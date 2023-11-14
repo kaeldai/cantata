@@ -37,7 +37,7 @@ fn zero() -> f64 {
 ///   z: [a, b, c] => Many([a, b, c])
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(untagged, deny_unknown_fields)]
-pub enum MaybeVec<T> {
+enum MaybeVec<T> {
     #[default]
     Nil,
     One(T),
@@ -52,6 +52,13 @@ impl<T> From<MaybeVec<T>> for Vec<T> {
             MaybeVec::Many(vs) => vs,
         }
     }
+}
+
+fn maybe_vec<'a, S: serde::Deserializer<'a>, T: Deserialize<'a>>(
+    ser: S,
+) -> Result<Vec<T>, S::Error> {
+    let v = MaybeVec::<T>::deserialize(ser)?;
+    Ok(v.into())
 }
 
 /// Simulation proceeds in blocks, either a count of steps, or a time interval
@@ -192,9 +199,12 @@ pub enum Input {
     #[serde(rename = "current_clamp")]
     CurrentClamp {
         module: String,
-        amp: MaybeVec<f64>,
-        delay: MaybeVec<f64>,
-        duration: MaybeVec<f64>,
+        #[serde(deserialize_with = "maybe_vec")]
+        amp: Vec<f64>,
+        #[serde(deserialize_with = "maybe_vec")]
+        delay: Vec<f64>,
+        #[serde(deserialize_with = "maybe_vec")]
+        duration: Vec<f64>,
         node_set: Option<NodeSet>,
         #[serde(default = "yes")]
         enabled: bool,
@@ -202,7 +212,8 @@ pub enum Input {
     #[serde(rename = "spikes")]
     Spikes {
         module: String,
-        input_file: MaybeVec<String>,
+        #[serde(deserialize_with = "maybe_vec")]
+        input_file: Vec<String>,
         node_set: String,
     },
     #[serde(rename = "lfp")]
@@ -233,7 +244,8 @@ pub enum Input {
     SynActivity {
         module: String,
         precell_filter: Map<String, Value>,
-        timestamps: MaybeVec<f64>,
+        #[serde(deserialize_with = "maybe_vec")]
+        timestamps: Vec<f64>,
         node_set: NodeSet,
     },
     #[serde(rename = "movie")]
@@ -294,7 +306,7 @@ pub struct Edges {
 
 fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Result<()> {
     // Strip out {} to reduce ${key} to $key
-    *val = val.replace(&['{', '}'], "");
+    *val = val.replace(['{', '}'], "");
     // Recursively replace $key with values from manifest
     'a: loop {
         for (k, v) in manifest {
@@ -303,7 +315,7 @@ fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Resul
                 continue 'a;
             }
         }
-        if val.contains("$") {
+        if val.contains('$') {
             bail!("Unresolved marker: {val}");
         }
         break;
@@ -344,12 +356,10 @@ impl Network {
     fn resolve_manifest(&mut self, manifest: &Manifest, base: &Path) -> Result<()> {
         self.nodes
             .iter_mut()
-            .map(|n| n.resolve_manifest(manifest, base))
-            .collect::<Result<_>>()?;
+            .try_for_each(|n| n.resolve_manifest(manifest, base))?;
         self.edges
             .iter_mut()
-            .map(|n| n.resolve_manifest(manifest, base))
-            .collect::<Result<_>>()
+            .try_for_each(|n| n.resolve_manifest(manifest, base))
     }
 }
 
@@ -377,8 +387,8 @@ pub struct Report {
     cells: NodeSet,
     variable_name: String,
     module: String,
-    #[serde(default)]
-    sections: MaybeVec<String>,
+    #[serde(default, deserialize_with = "maybe_vec")]
+    sections: Vec<String>,
     start_time: Option<f64>,
     end_time: Option<f64>,
     dt: Option<f64>,
@@ -445,35 +455,33 @@ impl Simulation {
 
         raw.components
             .iter_mut()
-            .map(|(_, it)| resolve_manifest(it, &raw.manifest, base_dir))
-            .collect::<Result<_>>()?;
+            .try_for_each(|(_, it)| resolve_manifest(it, &raw.manifest, base_dir))?;
 
         // Resolve the Network to an object
         let mut network = match raw.network {
             NetworkOrFile::Empty => return Err(anyhow!("No network defined!")),
             NetworkOrFile::File(file) => {
-                let mut path: String = base_dir.join(&file).to_str().unwrap().into();
+                let mut path: String = base_dir.join(file).to_str().unwrap().into();
                 resolve_manifest(&mut path, &raw.manifest, base_dir)?;
                 let rd = File::open(&path).with_context(|| format!("Opening {path:?}"))?;
                 let mut net: NetworkFile = serde_json::de::from_reader(rd)
                     .with_context(|| format!("Parsing network {path:?}"))?;
                 net.components
                     .iter_mut()
-                    .map(|(_, it)| resolve_manifest(it, &net.manifest, base_dir))
-                    .collect::<Result<_>>()?;
+                    .try_for_each(|(_, it)| resolve_manifest(it, &net.manifest, base_dir))?;
                 raw.components.append(&mut net.components);
-                net.network.resolve_manifest(&net.manifest, &base_dir)?;
+                net.network.resolve_manifest(&net.manifest, base_dir)?;
                 net.network
             }
             NetworkOrFile::Inline(net) => net,
         };
-        network.resolve_manifest(&raw.manifest, &base_dir)?;
+        network.resolve_manifest(&raw.manifest, base_dir)?;
 
         // Resolve the NodeSets
         let node_sets = {
             if let Some(file) = raw.node_sets_file {
-                let mut path: String = base_dir.join(&file).to_str().unwrap().into();
-                resolve_manifest(&mut path, &raw.manifest, &base_dir)?;
+                let mut path: String = base_dir.join(file).to_str().unwrap().into();
+                resolve_manifest(&mut path, &raw.manifest, base_dir)?;
                 let rd = File::open(&path).with_context(|| format!("Opening {path:?}"))?;
                 let nds: Map<String, NodeSet> = serde_json::de::from_reader(rd)
                     .with_context(|| format!("Parsing nodesets {path:?}"))?;
