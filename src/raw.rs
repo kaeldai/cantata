@@ -78,25 +78,25 @@ pub enum TimeBlock {
 pub struct Run {
     /// Begin of simulation [ms]
     #[serde(default = "zero")]
-    tstart: f64,
+    pub tstart: f64,
     /// End of simulation [ms]
-    tstop: f64,
+    pub tstop: f64,
     /// Timestep [ms]
-    dt: f64,
+    pub dt: f64,
     /// maximum CV length [um]
     /// If not given, models or simulators choose
     /// May be overwritten downstream
     #[serde(rename = "dL")]
-    dl: Option<f64>,
+    pub dl: Option<f64>,
     /// Spiking threshold [mV]
     /// If not given, models or simulators choose
     /// May be overwritten downstream
-    spike_threshold: Option<f64>,
+    pub spike_threshold: Option<f64>,
     /// time blocking
     #[serde(default)]
-    block: TimeBlock,
+    pub block: TimeBlock,
     /// Seed for PRNG
-    random_seed: Option<u64>,
+    pub random_seed: Option<u64>,
     // NOTE There's some ignored fields here:
     // * block_run
     // * block_size

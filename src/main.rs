@@ -579,6 +579,10 @@ impl PopId {
 
 #[derive(Debug)]
 pub struct Simulation {
+    /// runtime
+    tfinal: f64,
+    /// timestep
+    dt: f64,
     /// raw-ish node data
     node_lists: Vec<NodeList>,
     /// raw-ish edge data
@@ -631,6 +635,8 @@ impl Simulation {
         }
 
         Ok(Self {
+            tfinal: sim.run.tstop,
+            dt: sim.run.dt,
             node_lists,
             edge_lists,
             gid_to_population,
