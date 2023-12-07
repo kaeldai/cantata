@@ -1,10 +1,12 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use clap::{self, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sonata::{
     err::{Context, Result},
     raw, Map,
+    fit::Fit,
 };
+
 use std::{fs::File, str::FromStr};
 
 #[derive(Parser)]
@@ -17,7 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    Build { from: String, to: Option<String> },
+    Build { from: String, to: String },
+    Fit { from: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -206,7 +209,7 @@ impl NodeList {
         let mut pops = Vec::new();
         for population in &populations {
             let name = population.name().rsplit_once('/').unwrap().1.to_string();
-            let type_ids = get_dataset::<u64>(&population, "node_type_id")?;
+            let type_ids = get_dataset::<u64>(population, "node_type_id")?;
             let size = type_ids.len();
             let node_ids = get_dataset::<u64>(population, "node_id")
                 .unwrap_or_else(|_| (0..size as u64).collect::<Vec<_>>());
@@ -215,13 +218,13 @@ impl NodeList {
                     "Population {name} in {path:?} has mismatched #type_ids ./. #node_ids"
                 )
             }
-            let group_ids = get_dataset::<u64>(&population, "node_group_id")?;
+            let group_ids = get_dataset::<u64>(population, "node_group_id")?;
             if size != group_ids.len() {
                 anyhow::bail!(
                     "Population {name} in {path:?} has mismatched #type_ids ./. #group_id"
                 )
             }
-            let group_indices = get_dataset::<usize>(&population, "node_group_index")?;
+            let group_indices = get_dataset::<usize>(population, "node_group_index")?;
             if size != group_indices.len() {
                 anyhow::bail!(
                     "Population {name} in {path:?} has mismatched #type_ids ./. #group_index"
@@ -752,16 +755,227 @@ impl Simulation {
     }
 }
 
+/// Resources to store in the output.
+#[derive(Debug)]
+struct Bundle {
+    /// Python source for the recipe.
+    recipe: String,
+    /// A list of morphologies to copy.
+    mrfs: Vec<String>,
+}
+
+fn gen_recipe_py(sim: &Simulation) -> Result<Bundle> {
+    let mut gid_to_mid = Map::new();
+    let mut gid_to_kid = Vec::new();
+    let mut mid_to_mrf = Vec::new();
+    let mut mrf_to_mid = Map::new();
+
+    for gid in 0..sim.size {
+        let node = sim.reify_node(gid)?;
+        match &node.node_type.model_type {
+            ModelType::Biophysical { model_template, attributes } => {
+                match model_template.as_ref() {
+                    "ctdb:Biophys1.hoc" => {
+                        if let Some(Attribute::String(mrf)) = attributes.get("morphology") {
+                            if !mrf_to_mid.contains_key(mrf) {
+                                let mid = mid_to_mrf.len();
+                                mid_to_mrf.push(mrf.to_string());
+                                mrf_to_mid.insert(mrf.to_string(), mid);
+                            }
+                            let mid = mrf_to_mid[mrf];
+                            gid_to_mid.insert(gid, mid);
+                        } else {
+                            bail!("GID {gid} is a biophysical cell, but has no morphology.");
+                        }
+                        gid_to_kid.push(Some(0));
+                    }
+                    t => bail!("Unknown model template <{t}> for gid {gid}"),
+                }
+            }
+            ModelType::Virtual { attributes } => {
+                gid_to_kid.push(Some(2));
+            }
+            ModelType::Point { attributes, model_template } => {
+                gid_to_kid.push(Some(1));
+            }
+            _ => gid_to_kid.push(None),
+        }
+    }
+
+    let mut py_gid_to_mid = String::from("{");
+    for (gid, mid) in gid_to_mid.iter() {
+        py_gid_to_mid.push_str(&format!("{gid}: {mid}, "))
+    }
+    py_gid_to_mid.push_str("}");
+
+    let mut py_mid_to_mrf = String::from("[");
+    for mrf in mid_to_mrf.iter() {
+        py_mid_to_mrf.push_str(&format!("\"{mrf}\", "))
+    }
+    py_mid_to_mrf.push_str("]");
+
+    let mut py_gid_to_kid = String::from("[");
+    for kid in gid_to_kid.iter() {
+        if let Some(kid) = kid {
+            py_gid_to_kid.push_str(&format!("{kid}, "));
+        } else {
+            py_gid_to_kid.push_str("None, ");
+        }
+    }
+    py_gid_to_kid.push_str("]");
+
+    let recipe = format!("
+class recipe(A.recipe):
+
+    def __init__(self):
+        A.recipe.__init__(self)
+        self.cells = {}
+        self.gid_to_mid = {}
+        self.mid_to_mrf = {}
+        self.gid_to_kid = {}
+
+        self.cable_props = A.neuron_cable_properties()
+        self.cable_props.catalogue.extend(A.allen_catalogue(), '')
+
+    def cell_kind(self, gid):
+        kind = self.gid_to_kid[gid]
+        if kind == 0:
+            return A.cell_kind.cable
+        elif kind == 1:
+            return A.cell_kind.lif
+        elif kind == 2:
+            return A.cell_kind.spike_source
+        else:
+            raise RuntimeError('Unknown cell kind')
+
+    def num_cells(self):
+        return self.cells
+
+    def connections_on(self, gid):
+        return []
+
+    def global_properties(self, kind):
+        if kind == A.cell_kind.cable:
+            return self.cable_props
+        raise RuntimeError('Unexpected cell kind')
+
+    def cell_description(self, gid):
+        kind = self.gid_to_kid[gid]
+        if kind == 0:
+            mid = self.gid_to_mid[gid]
+            mrf = load_morphology(here / 'mrf' / self.mid_to_mrf[mid])
+            dec = A.decor()
+            lbl = A.label_dict()
+            return A.cable_cell(mrf, dec, lbl)
+        elif kind == 1:
+            return A.lif_cell('src', 'tgt')
+        elif kind == 2:
+            return A.spike_source_cell('src', A.explicit_schedule([]))
+        else:
+            raise RuntimeError('Unknown cell kind')
+
+", sim.size, py_gid_to_mid, py_mid_to_mrf, py_gid_to_kid);
+
+    Ok(Bundle { recipe, mrfs: mid_to_mrf })
+}
+
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { from, .. } => {
-            let sim = raw::Simulation::from_file(&from)
+        Cmd::Fit { from } => {
+            let raw = Fit::from_file(&from)
+                .with_context(|| format!("Parsing fit {from}"))?;
+            eprintln!("Raw Fit: {raw:#?}");
+            eprintln!("Mechanisms: {:#?}", raw.decor()?);
+            Ok(())
+        },
+        Cmd::Build { from, to } => {
+            let raw = raw::Simulation::from_file(&from)
                 .with_context(|| format!("Parsing simulation {from}"))?;
-            eprintln!("Raw Simulation: {sim:#?}");
-            let sim = Simulation::new(&sim)?;
-            println!("Simulation: {sim:#?}");
-            println!("{:#?}", sim.reify_node(0)?);
+            eprintln!("Raw Simulation: {raw:#?}");
+            let sim = Simulation::new(&raw)?;
+            let out = gen_recipe_py(&sim).with_context(|| "Generating Python code")?;
+
+            // Create all required directories
+            let mut to = std::path::PathBuf::from_str(&to)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("Resolving output dir {to}"))?;
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+
+            to.push("mrf");
+
+            for mrf in &out.mrfs {
+                to.push(mrf);
+                let mut done = false;
+                for pth in raw.components.values() {
+                    let mut src = std::path::PathBuf::from_str(pth)?;
+                    src.push(mrf);
+                    if src.exists() {
+                        std::fs::copy(&src, &to)?;
+                        done = true;
+                        break;
+                    }
+                    src.pop();
+                }
+                to.pop();
+                if !done {
+                    bail!("Couldn't find required resource {mrf}");
+                }
+            }
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+            to.pop();
+
+            to.push("acc");
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+            to.pop();
+
+            to.push("dat");
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+            to.pop();
+
+            to.push("out");
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+            to.pop();
+
+            to.push("main.py");
+            std::fs::write(&to,
+                           format!("import arbor as A
+from arbor import units as U
+
+from pathlib import Path
+
+here = Path(__file__).parent
+
+def load_morphology(path):
+    sfx = path.suffix
+    if sfx == '.swc':
+        try:
+            return A.load_swc_arbor(path)
+        except:
+            pass
+        try:
+            return A.load_swc_neuron(path)
+        except:
+            raise RuntimeError(f\"Could load {{path}} neither as NEURON nor Arbor flavour.\")
+    elif sfx == '.asc':
+        return A.load_asc(path).morphology
+    elif sfx == '.nml':
+        nml = A.load_nml(path)
+        if len(nml.morphology_ids()) == 1:
+            return nml.morphology(nml.morphology_ids()[0]).morphology
+        else:
+            raise RuntimeError(f\"NML file {{path}} contains multiple morphologies.\")
+    else:
+        raise RuntimeError(f\"Unknown morphology file type {{sfx}}\")
+
+{}
+rec = recipe()
+sim = A.simulation(rec)
+sim.run(10*U.ms, 0.025*U.ms)
+", out.recipe)).with_context(|| format!("Creating simulation file {to:?}"))?;
+            to.pop();
+
             Ok(())
         }
     }
