@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sonata::{
     err::{Context, Result},
     raw, Map,
-    fit::Fit,
+    fit::{Fit, self, Parameter},
 };
 
 use std::{fs::File, str::FromStr};
@@ -360,6 +360,8 @@ pub struct EdgeList {
     populations: Vec<EdgePopulation>,
     /// Cumulative size of populations
     size: usize,
+    /// dynamics parameters read from type CSV file; keyed on the filename(!)
+    dynamics: Map<String, Map<String, f64>>,
 }
 
 fn get_dataset<T: hdf5::H5Type + Clone>(g: &hdf5::Group, nm: &str) -> Result<Vec<T>> {
@@ -510,6 +512,7 @@ impl EdgeList {
             types: tys,
             populations: pops,
             size: total_size,
+            dynamics: Map::new(),
         })
     }
 }
@@ -521,6 +524,10 @@ pub struct Edge {
     index: usize,
     type_id: u64,
     src_gid: u64,
+    mech: String,
+    delay: f64,
+    weight: f64,
+    dynamics: Map<String, f64>,
 }
 
 /// Reified node, containing all information we currently have
@@ -608,12 +615,24 @@ impl Simulation {
             .iter()
             .map(NodeList::new)
             .collect::<Result<Vec<_>>>()?;
-        let edge_lists = sim
+        let mut edge_lists = sim
             .network
             .edges
             .iter()
             .map(EdgeList::new)
             .collect::<Result<Vec<_>>>()?;
+
+        for el in edge_lists.iter_mut() {
+            for ty in el.types.iter_mut() {
+                if let Some(Attribute::String(name)) = ty.attributes.get("dynamics_params") {
+                    let fname = find_component(name, &sim.components)?;
+                    let fdata = std::fs::read_to_string(fname)?;
+                    let fdata: Map<String, serde_json::Value> = serde_json::from_str(&fdata).with_context(|| format!("Parsing JSON from {name}"))?;
+                    let fdata = fdata.into_iter().filter_map(|(k, v)| v.as_f64().map(|v| (k.to_string(), v))).collect();
+                    el.dynamics.insert(name.to_string(), fdata);
+                }
+            }
+        }
         let mut gid = 0;
         let mut start = 0;
         let mut population_to_gid = Map::new();
@@ -704,12 +723,68 @@ impl Simulation {
                             .group_indices
                             .get(edge_index)
                             .ok_or_else(node_index_error)?;
+                        let ty = edge_list
+                            .types
+                            .iter()
+                            .find(|ty| ty.type_id == type_id)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Couldn't find edge type {type_id} in population {}",
+                                    edge.name
+                                )
+                            })?;
+                        let delay = if let Some(d) = ty.attributes.get("delay") {
+                            if let Attribute::Float(d) = d {
+                                *d
+                            } else {
+                                bail!("Edge type {type_id} in population {} has non-float delay", edge.name);
+                            }
+                        } else {
+                            bail!("Edge type {type_id} in population {} has no delay", edge.name);
+                        };
+                        let weight = if let Some(d) = ty.attributes.get("syn_weight") {
+                            if let Attribute::Float(d) = d {
+                                *d
+                            } else {
+                                bail!("Edge type {type_id} in population {} has non-float weight", edge.name);
+                            }
+                        } else {
+                            bail!("Edge type {type_id} in population {} has no weight", edge.name);
+                        };
+
+                        let mech = if let Some(s) = ty.attributes.get("model_template") {
+                            if let Attribute::String(s) = s {
+                                s.to_string()
+                            } else {
+                                bail!("Edge type {type_id} in population {} has non-string model", edge.name);
+                            }
+                        } else {
+                            String::from("NULL") // Yuck
+                        };
+
+                        let mut dynamics = Map::new();
+                        if let Some(s) = ty.attributes.get("dynamics_params") {
+                            if let Attribute::String(s) = s {
+                                if let Some(d) = edge_list.dynamics.get(s) {
+                                    dynamics = d.clone();
+                                } else {
+                                    bail!("Edge type {type_id} in population {} has unknown dynamics {s}", edge.name);
+                                }
+                            } else {
+                                bail!("Edge type {type_id} in population {} has non-string params", edge.name);
+                            }
+                        }
+
                         incoming_edges.push(Edge {
                             pop: edge.name.to_string(),
                             group_id,
                             index,
                             type_id,
                             src_gid,
+                            mech,
+                            delay,
+                            weight,
+                            dynamics,
                         });
                     }
                 }
@@ -768,16 +843,27 @@ struct Bundle {
     recipe: String,
     /// A list of morphologies to copy.
     mrfs: Vec<String>,
+    /// A list of fits to generate.
+    fits: Vec<String>,
 }
 
 fn gen_recipe_py(sim: &Simulation) -> Result<Bundle> {
     let mut gid_to_mid = Map::new();
+    let mut gid_to_cid = Map::new();
     let mut gid_to_kid = Vec::new();
     let mut mid_to_mrf = Vec::new();
     let mut mrf_to_mid = Map::new();
+    let mut gid_to_inc = Vec::new();
+
+    let mut fits = Vec::new();
 
     for gid in 0..sim.size {
         let node = sim.reify_node(gid)?;
+        let mut inc = Vec::new();
+        for edge in node.incoming_edges {
+            inc.push((edge.src_gid, edge.mech, edge.dynamics, edge.weight, edge.delay));
+        }
+        gid_to_inc.push(inc);
         match &node.node_type.model_type {
             ModelType::Biophysical { model_template, attributes } => {
                 match model_template.as_ref() {
@@ -794,6 +880,12 @@ fn gen_recipe_py(sim: &Simulation) -> Result<Bundle> {
                             bail!("GID {gid} is a biophysical cell, but has no morphology.");
                         }
                         gid_to_kid.push(Some(0));
+                        if let Some(Attribute::String(fit)) = attributes.get("dynamics_params") {
+                            fits.push(fit.to_string());
+                            gid_to_cid.insert(gid, fit.split_once('.').unwrap().0.to_string());
+                        } else {
+                            bail!("GID {gid} is a biophysical cell, but has no dynamics_params.");
+                        }
                     }
                     t => bail!("Unknown model template <{t}> for gid {gid}"),
                 }
@@ -816,7 +908,7 @@ fn gen_recipe_py(sim: &Simulation) -> Result<Bundle> {
 
     let mut py_mid_to_mrf = String::from("[");
     for mrf in mid_to_mrf.iter() {
-        py_mid_to_mrf.push_str(&format!("\"{mrf}\", "))
+        py_mid_to_mrf.push_str(&format!("'{mrf}', "))
     }
     py_mid_to_mrf.push_str("]");
 
@@ -830,15 +922,45 @@ fn gen_recipe_py(sim: &Simulation) -> Result<Bundle> {
     }
     py_gid_to_kid.push_str("]");
 
+    let mut py_gid_to_cid = String::from("{");
+    for (gid, cid) in gid_to_cid.iter() {
+        py_gid_to_cid.push_str(&format!("{gid}: '{cid}', "))
+    }
+    py_gid_to_cid.push_str("}");
+
+    let mut py_gid_to_inc = String::from("[");
+    for inc in gid_to_inc.iter() {
+        py_gid_to_inc.push_str("[");
+        for (src, syn, ps, w, d) in inc {
+            let mut py_ps = String::from("{");
+            for (k, v) in ps.iter() {
+                py_ps.push_str(&format!("'{k}': {v}, ", k = k, v = v));
+            }
+            py_ps.push_str("}");
+            py_gid_to_inc.push_str(&format!("({src}, \"{syn}\", {py_ps}, {w}, {d}), "));
+        }
+        py_gid_to_inc.push_str("], ");
+    }
+    py_gid_to_inc.push_str("]");
+
     let recipe = format!("
 class recipe(A.recipe):
 
     def __init__(self):
         A.recipe.__init__(self)
         self.cells = {}
+        # gid -> morphology id
         self.gid_to_mid = {}
+        # morphology id -> morphology resource file
         self.mid_to_mrf = {}
+        # gid -> cell kind
         self.gid_to_kid = {}
+        # gid -> cell description
+        self.gid_to_cid = {}
+        # gid -> incoming connections
+        self.gid_to_inc = {}
+        # spike threshold
+        self.threshold = -15
 
         self.cable_props = A.neuron_cable_properties()
         self.cable_props.catalogue.extend(A.allen_catalogue(), '')
@@ -858,7 +980,15 @@ class recipe(A.recipe):
         return self.cells
 
     def connections_on(self, gid):
-        return []
+        kind = self.gid_to_kid[gid]
+        if kind == 0:
+            return [A.connection((src, 'src'), 'tgt'+str(ix), w, d * U.ms)
+                    for ix, (src, _, _, w, d)
+                    in enumerate(self.gid_to_inc[gid])]
+        else:
+            return [A.connection((src, 'src'), 'tgt', w, d * U.ms)
+                    for (src, _, _, w, d)
+                    in self.gid_to_inc[gid]]
 
     def global_properties(self, kind):
         if kind == A.cell_kind.cable:
@@ -870,8 +1000,13 @@ class recipe(A.recipe):
         if kind == 0:
             mid = self.gid_to_mid[gid]
             mrf = load_morphology(here / 'mrf' / self.mid_to_mrf[mid])
-            dec = A.decor()
+            dec = A.load_component(here / 'acc' / (self.gid_to_cid[gid] + '.acc')).component
+            dec.place('(location 0 0.5)', A.threshold_detector(self.threshold * U.mV), 'src')
+            for ix, (_, syn, params, _, _) in enumerate(self.gid_to_inc[gid]):
+                #NB. fix parameters?! dec.place('(location 0 0.5)', A.synapse(syn, **params), 'tgt'+str(ix))
+                dec.place('(location 0 0.5)', A.synapse(syn), 'tgt'+str(ix))
             lbl = A.label_dict()
+            lbl = lbl.add_swc_tags()
             return A.cable_cell(mrf, dec, lbl)
         elif kind == 1:
             return A.lif_cell('src', 'tgt')
@@ -880,20 +1015,37 @@ class recipe(A.recipe):
         else:
             raise RuntimeError('Unknown cell kind')
 
-", sim.size, py_gid_to_mid, py_mid_to_mrf, py_gid_to_kid);
+", sim.size, py_gid_to_mid, py_mid_to_mrf, py_gid_to_kid, py_gid_to_cid, py_gid_to_inc);
 
-    Ok(Bundle { recipe, mrfs: mid_to_mrf })
+    Ok(Bundle { recipe, mrfs: mid_to_mrf, fits })
 }
 
+fn find_component(file: &str, components: &Map<String, String>) -> Result<std::path::PathBuf> {
+    for pth in components.values() {
+        let mut src = std::path::PathBuf::from_str(pth)?;
+        src.push(file);
+        if src.exists() {
+            return Ok(src);
+        }
+        src.pop();
+    }
+    bail!("Couldn't find required resource {file}");
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Fit { from } => {
-            let raw = Fit::from_file(&from)
+            let ifn = std::path::PathBuf::from_str(&from)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("Resolving input file {from}"))?;
+            let raw = Fit::from_file(&ifn)
                 .with_context(|| format!("Parsing fit {from}"))?;
             eprintln!("Raw Fit: {raw:#?}");
-            eprintln!("Mechanisms: {:#?}", raw.decor()?);
+            let dec = raw.decor()?;
+            eprintln!("Mechanisms: {:#?}", dec);
+            let acc = dec.to_acc()?;
+            eprintln!("ACC: {}", acc);
             Ok(())
         },
         Cmd::Build { from, to } => {
@@ -910,30 +1062,27 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
             to.push("mrf");
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
             for mrf in &out.mrfs {
+                let src = find_component(mrf, &raw.components)?;
                 to.push(mrf);
-                let mut done = false;
-                for pth in raw.components.values() {
-                    let mut src = std::path::PathBuf::from_str(pth)?;
-                    src.push(mrf);
-                    if src.exists() {
-                        std::fs::copy(&src, &to)?;
-                        done = true;
-                        break;
-                    }
-                    src.pop();
-                }
+                std::fs::copy(&src, &to).with_context(|| format!("Copying {src:?} to {to:?}"))?;
                 to.pop();
-                if !done {
-                    bail!("Couldn't find required resource {mrf}");
-                }
             }
-            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
             to.pop();
 
             to.push("acc");
             std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+
+            for fit in &out.fits {
+                to.push(fit);
+                to.set_extension("acc");
+                let src = find_component(&fit, &raw.components)?;
+                let inp = Fit::from_file(&src)?.decor()?.to_acc()?;
+                std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
+                to.pop();
+            }
             to.pop();
 
             to.push("dat");
@@ -978,8 +1127,8 @@ def load_morphology(path):
 {}
 rec = recipe()
 sim = A.simulation(rec)
-sim.run(10*U.ms, 0.025*U.ms)
-", out.recipe)).with_context(|| format!("Creating simulation file {to:?}"))?;
+sim.run({}*U.ms, {}*U.ms)
+", out.recipe, sim.tfinal, sim.dt)).with_context(|| format!("Creating simulation file {to:?}"))?;
             to.pop();
 
             Ok(())
