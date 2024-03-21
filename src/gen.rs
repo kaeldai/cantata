@@ -1,0 +1,250 @@
+use crate::{
+    err::Result,
+    fit::Attribute,
+    sim::{CVPolicy, IClamp, ModelType, Probe, ProbeKind, Simulation},
+    Map,
+};
+use anyhow::bail;
+use serde::Serialize;
+
+/// Resources to store in the output.
+
+type ConnectionData = (usize, String, String, f64, f64);
+type ProbeData = (Option<String>, String, String);
+type SynapseData = (String, String, Map<String, f64>, String);
+type IClampData = (String, f64, f64, f64, String);
+
+#[derive(Debug, Serialize)]
+pub struct Bundle {
+    pub time: f64,
+    pub time_step: f64,
+    pub size: usize,
+    pub max_cv_length: Option<f64>,
+    /// gid to morphology and acc ids
+    /// this works as an index into the next two fields.
+    pub cell_bio_ids: Map<usize, (usize, usize)>,
+    /// acc index to name
+    pub morphology: Vec<String>,
+    /// morphology index to name
+    pub decoration: Vec<String>,
+    /// cell kinds, 0 = cable, 1 = lif, 2 = spike source, ...
+    pub cell_kind: Vec<u64>,
+    /// synapse data, cross-linked with incoming connections.
+    /// Location, Synapse, Parameters, Tag
+    /// May only be set iff kind==cable
+    pub synapses: Map<usize, Vec<SynapseData>>,
+    /// stimuli; May only be set iff kind==cable
+    /// location, delay, duration, amplitude, tag
+    pub current_clamps: Map<usize, Vec<IClampData>>,
+    /// List of data exporters
+    /// location, variable, tag. NOTE _could_ make variable an u64?!
+    pub probes: Map<usize, Vec<ProbeData>>,
+    /// Incoming connections as (src_gid, src_tag, tgt_tag, weight, delay)
+    pub incoming_connections: Map<usize, Vec<ConnectionData>>,
+    /// Spiking threshold
+    pub spike_threshold: f64,
+    /// sparse map of gids to LIF cell descrption. Valid iff kind(gid) == LIF
+    pub gid_to_lif: Map<usize, Map<String, f64>>,
+}
+
+const KIND_CABLE: u64 = 0;
+const KIND_LIF: u64 = 1;
+const KIND_SOURCE: u64 = 2;
+
+impl Bundle {
+    pub fn new(sim: &Simulation) -> Result<Self> {
+        // Reverse lookup tables, used internally for uniqueness and index generation.
+        let mut acc_to_cid = Map::new();
+        let mut mrf_to_mid = Map::new();
+
+        // Look up tables to write out
+        let mut cell_bio_ids = Map::new();
+        let mut morphology = Vec::new();
+        let mut decoration = Vec::new();
+        let mut cell_kind = Vec::new();
+        let mut incoming_connections = Map::new();
+        let mut synapses = Map::new();
+        let mut current_clamps = Map::new();
+        let mut probes = Map::new();
+        let mut gid_to_lif = Map::new();
+        for gid in 0..sim.size {
+            let node = sim.reify_node(gid)?;
+            if !node.incoming_edges.is_empty() {
+                if matches!(node.node_type.model_type, ModelType::Biophysical { .. }) {
+                    let mut inc = Vec::new();
+                    let mut syn = Vec::new();
+                    for (ix, edge) in node.incoming_edges.iter().enumerate() {
+                        let tgt = format!("syn_{ix}");
+                        inc.push((
+                            edge.src_gid as usize,
+                            String::from("src"), // in our SONATA model, there is _one_ source on each cell.
+                            tgt.clone(),
+                            edge.weight,
+                            edge.delay,
+                        ));
+                        syn.push((
+                            String::from("(location 0 0.5)"),
+                            edge.mech
+                                .as_ref()
+                                .expect("Needed a synapse kind.")
+                                .to_string(),
+                            edge.dynamics.clone(),
+                            tgt,
+                        ));
+                    }
+                    incoming_connections.insert(gid, inc);
+                    synapses.insert(gid, syn);
+                } else {
+                    let inc = node
+                        .incoming_edges
+                        .iter()
+                        .map(|e| {
+                            (
+                                e.src_gid as usize,
+                                String::from("src"), // in our SONATA model, there is _one_ source on each cell.
+                                String::from("tgt"),
+                                e.weight,
+                                e.delay,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    incoming_connections.insert(gid, inc);
+                };
+            }
+
+            match &node.node_type.model_type {
+                ModelType::Biophysical {
+                    model_template,
+                    attributes,
+                } => {
+                    cell_kind.push(KIND_CABLE);
+                    match model_template.as_ref() {
+                        "ctdb:Biophys1.hoc" => {
+                            let mid = if let Some(Attribute::String(mrf)) =
+                                attributes.get("morphology")
+                            {
+                                if !mrf_to_mid.contains_key(mrf) {
+                                    let mid = morphology.len();
+                                    morphology.push(mrf.to_string());
+                                    mrf_to_mid.insert(mrf.to_string(), mid);
+                                }
+                                mrf_to_mid[mrf]
+                            } else {
+                                bail!("GID {gid} is a biophysical cell, but has no morphology.");
+                            };
+                            let cid = if let Some(Attribute::String(fit)) =
+                                attributes.get("dynamics_params")
+                            {
+                                let acc = fit;
+                                if !acc_to_cid.contains_key(acc) {
+                                    let cid = decoration.len();
+                                    decoration.push(acc.to_string());
+                                    acc_to_cid.insert(acc.to_string(), cid);
+                                }
+                                acc_to_cid[acc]
+                            } else {
+                                bail!(
+                                    "GID {gid} is a biophysical cell, but has no dynamics_params."
+                                );
+                            };
+                            cell_bio_ids.insert(gid, (mid, cid));
+                        }
+                        t => bail!("Unknown model template <{t}> for gid {gid}"),
+                    }
+                }
+                ModelType::Virtual { .. } => {
+                    cell_kind.push(KIND_SOURCE);
+                }
+                ModelType::Point { model_template, attributes } => {
+                    cell_kind.push(KIND_LIF);
+                    println!("template={model_template:?} attributes={attributes:?} params={:?}", node.dynamics);
+                    match model_template.as_ref() {
+                        "nrn:IntFire1" => {
+                            // Taken from nrn/IntFire1.mod and adapted to Arbor.
+                            let mut params = Map::from([("cm".to_string(), 1.0),
+                                                        ("U_neutral".to_string(), 0.0),
+                                                        ("U_reset".to_string(), 0.0),
+                                                        ("U_0".to_string(), 0.0),
+                                                        ("t_ref".to_string(), 5.0),
+                                                        ("tau".to_string(), 10.0),]);
+                            for (k, v) in node.dynamics.iter() {
+                                match k.as_ref() {
+                                    "tau" =>
+                                        params.insert("tau".to_string(), *v),
+                                    "refrac" =>
+                                        params.insert("t_ref".to_string(), *v),
+                                    _ => bail!("Unknown parameter <{k}> for template IntFire1 at gid {gid}")
+                                };
+                            }
+                            gid_to_lif.insert(gid, params);
+                        }
+                        t => bail!("Unknown model template <{t}> for gid {gid}"),
+                    }
+                }
+                mt => bail!("Cannot write ModelType {mt:?}"),
+            }
+        }
+
+        for (gid, ics) in &sim.iclamps {
+            let mut stim = Vec::new();
+            for IClamp {
+                amplitude_nA,
+                delay_ms,
+                duration_ms,
+                tag,
+                location,
+            } in ics
+            {
+                stim.push((
+                    location.clone(),
+                    *delay_ms,
+                    *duration_ms,
+                    *amplitude_nA,
+                    tag.clone(),
+                ));
+            }
+            current_clamps.insert(*gid as usize, stim);
+        }
+
+        for (gid, sim_probes) in &sim.reports {
+            let mut prbs = Vec::new();
+            for Probe { variable, kind } in sim_probes {
+                match kind {
+                    ProbeKind::Cable(ls) => {
+                        for l in ls {
+                            let tag = format!("prb-{variable}@{l}");
+                            prbs.push((Some(l.clone()), variable.clone(), tag));
+                        }
+                    }
+                    ProbeKind::Lif => {
+                        let tag = format!("prb-{variable}");
+                        prbs.push((None, variable.clone(), tag.clone()));
+                    }
+                }
+            }
+            probes.insert(*gid as usize, prbs);
+        }
+
+        let max_cv_length = match &sim.cv_policy {
+            CVPolicy::Default => None,
+            CVPolicy::MaxExtent(l) => Some(*l),
+        };
+
+        Ok(Bundle {
+            time: sim.tfinal,
+            time_step: sim.dt,
+            max_cv_length,
+            size: sim.size,
+            cell_bio_ids,
+            morphology,
+            decoration,
+            synapses,
+            probes,
+            incoming_connections,
+            cell_kind,
+            current_clamps,
+            spike_threshold: sim.spike_threshold,
+            gid_to_lif,
+        })
+    }
+}

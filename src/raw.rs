@@ -214,11 +214,11 @@ pub enum Input {
         module: String,
         #[serde(deserialize_with = "maybe_vec")]
         input_file: Vec<String>,
-        node_set: String,
+        node_set: NodeSet,
     },
     #[serde(rename = "lfp")]
     LFP {
-        node_set: String,
+        node_set: NodeSet,
         module: String,
         positions_file: String,
         mesh_files_dir: String,
@@ -305,10 +305,10 @@ pub struct Edges {
 }
 
 fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Result<()> {
-    // Strip out {} to reduce ${key} to $key
-    *val = val.replace(['{', '}'], "");
     // Recursively replace $key with values from manifest
     'a: loop {
+        // Strip out {} to reduce ${key} to $key
+        *val = val.replace(['{', '}'], "");
         for (k, v) in manifest {
             if val.contains(k) {
                 *val = val.replace(k, v);
@@ -316,7 +316,7 @@ fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Resul
             }
         }
         if val.contains('$') {
-            bail!("Unresolved marker: {val}");
+            bail!("Unresolved marker: {val}; manifest={manifest:?}");
         }
         break;
     }
@@ -327,6 +327,9 @@ fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Resul
             base.to_str().unwrap(),
             val.strip_prefix("./").unwrap()
         );
+    }
+    if !val.starts_with('/') {
+        *val = format!("{}/{}", base.to_str().unwrap(), val);
     }
     Ok(())
 }
@@ -384,18 +387,18 @@ pub enum NetworkOrFile {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Report {
-    cells: NodeSet,
-    variable_name: String,
-    module: String,
+    pub cells: NodeSet,
+    pub variable_name: String,
+    pub module: String,
     #[serde(default, deserialize_with = "maybe_vec")]
-    sections: Vec<String>,
-    start_time: Option<f64>,
-    end_time: Option<f64>,
-    dt: Option<f64>,
-    unit: Option<String>,
-    file_name: Option<String>,
+    pub sections: Vec<String>,
+    pub start_time: Option<f64>,
+    pub end_time: Option<f64>,
+    pub dt: Option<f64>,
+    pub unit: Option<String>,
+    pub file_name: Option<String>,
     #[serde(default = "yes")]
-    enabled: bool,
+    pub enabled: bool,
     // There's a metric ton of undocumented keys:
     // * electrode positions
     // * transform
@@ -453,6 +456,13 @@ impl Simulation {
         let mut raw: SimulationRaw = serde_json::de::from_reader(rd)
             .with_context(|| format!("Parsing simulation {path:?}"))?;
 
+        raw.manifest.insert(
+            "$configdir".to_string(),
+            base_dir
+                .to_str()
+                .expect("Couldn't convert path to str")
+                .into(),
+        );
         raw.components
             .iter_mut()
             .try_for_each(|(_, it)| resolve_manifest(it, &raw.manifest, base_dir))?;
@@ -466,6 +476,13 @@ impl Simulation {
                 let rd = File::open(&path).with_context(|| format!("Opening {path:?}"))?;
                 let mut net: NetworkFile = serde_json::de::from_reader(rd)
                     .with_context(|| format!("Parsing network {path:?}"))?;
+                net.manifest.insert(
+                    "$configdir".to_string(),
+                    base_dir
+                        .to_str()
+                        .expect("Couldn't convert path to str")
+                        .into(),
+                );
                 net.components
                     .iter_mut()
                     .try_for_each(|(_, it)| resolve_manifest(it, &net.manifest, base_dir))?;
