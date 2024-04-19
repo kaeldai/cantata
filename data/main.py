@@ -50,6 +50,8 @@ class recipe(A.recipe):
             self.gid_to_bio = { int(k): v for k, v in data['cell_bio_ids'].items() }
             # gid -> lif cell data
             self.gid_to_lif = { int(k): v for k, v in data['gid_to_lif'].items() }
+            # gid -> virtual cell data
+            self.gid_to_vrt = { int(k): v for k, v in data['gid_to_vrt'].items() }
             # morphology id -> morphology resource file
             self.mid_to_mrf = data['morphology']
             # cell id -> decor file
@@ -85,7 +87,7 @@ class recipe(A.recipe):
     def connections_on(self, gid):
         if not gid in self.gid_to_inc:
             return []
-        return [A.connection((src, lbl), tgt, w, d * U.ms)
+        return [A.connection((src, lbl), tgt, w, max(d, self.dt) * U.ms)
                 for src, lbl, tgt, w, d
                 in self.gid_to_inc[gid]]
 
@@ -101,7 +103,7 @@ class recipe(A.recipe):
         elif kind == 1:
             return self.make_lif_cell(gid)
         elif kind == 2:
-            return A.spike_source_cell('src', A.explicit_schedule([]))
+            return self.make_vrt_cell(gid)
         else:
             raise RuntimeError('Unknown cell kind')
 
@@ -112,12 +114,16 @@ class recipe(A.recipe):
             for loc, var, tag in self.gid_to_prb[gid]:
                 if kind == A.cell_kind.cable:
                     loc = f'(on-components 0.5 (region "{loc}"))'
-                    if var == 'membrane_voltage':
+                    if var == 'voltage':
                         res.append(A.cable_probe_membrane_voltage(loc, tag))
+                    elif var.endswith('i'):
+                        res.append(A.cable_probe_ion_int_concentration(loc, var[:-1], tag))
+                    elif var.endswith('o'):
+                        res.append(A.cable_probe_ion_ext_concentration(loc, var[:-1], tag))
                     else:
-                        raise RuntimeError(f'Probing var={var} not yet implemented')
+                        print(f"Skipping unknown cable probe: {var}")
                 elif kind == A.cell_kind.lif:
-                    if var == 'membrane_voltage':
+                    if var == 'voltage':
                         res.append(A.lif_probe_voltage(tag))
                     else:
                         raise RuntimeError(f'Probing var={var} not yet implemented')
@@ -155,6 +161,10 @@ class recipe(A.recipe):
         cell.V_th = self.threshold * U.mV
         cell.t_ref = data['t_ref'] * U.ms
         return cell
+
+    def make_vrt_cell(self, gid):
+        return A.spike_source_cell("src",
+                                   A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]]))
 
 rec = recipe()
 sim = A.simulation(rec)

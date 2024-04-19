@@ -2,7 +2,7 @@ use crate::{
     err::{Context, Result},
     fit::Attribute,
     raw,
-    sup::find_component,
+    sup::{find_component, Components},
     Map,
 };
 use anyhow::{anyhow, bail};
@@ -592,6 +592,8 @@ pub struct Simulation {
     pub cv_policy: CVPolicy,
     /// threshold for spike generation
     pub spike_threshold: f64,
+    /// virtual cell spikes
+    pub virtual_spikes: Map<String, Map<u64, Vec<f64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -601,18 +603,15 @@ pub enum CVPolicy {
 }
 
 #[derive(Debug, Clone)]
-pub enum ProbeKind {
-    Cable(Vec<String>),
+pub enum Probe {
+    CableVoltage(Vec<String>),
+    CableIntConc(String, Vec<String>),
+    CableExtConc(String, Vec<String>),
+    CableState(String, Vec<String>),
     Lif,
 }
 
-#[derive(Debug)]
-pub struct Probe {
-    /// Variable to probe
-    pub variable: String,
-    pub kind: ProbeKind,
-}
-
+#[allow(non_snake_case)]
 #[derive(Debug, Clone)]
 pub struct IClamp {
     pub amplitude_nA: f64,
@@ -646,6 +645,82 @@ fn resolve_nodeset(
         }
     };
     Ok(res)
+}
+
+fn read_virtual_spikes(components: &Components,
+                       inputs: &raw::Inputs) -> Result<Map<String, Map<u64, Vec<f64>>>> {
+    let mut res: Map<String, Map<u64, Vec<f64>>> = Map::new();
+    for input in inputs.values() {
+        if let raw::Input::Spikes { module, input_file, node_set } = input {
+            if module != "sonata" {
+                bail!("Unknown module '{module}' for Input::Spikes");
+            }
+            if let raw::NodeSet::Name(node_set_name) = node_set {
+                let data = res.entry(node_set_name.to_string()).or_default();
+                for ifn in input_file {
+                    let ifn = find_component(ifn, components)?;
+                    let spikes = hdf5::file::File::open(&ifn)?
+                        .group("spikes")?
+                        .group(node_set_name)?;
+                    let nodes  = get_dataset::<u32>(&spikes, "node_ids")?;
+                    let times = get_dataset::<f64>(&spikes, "timestamps")?;
+                    if times.len() != nodes.len() {
+                        bail!("Virtual spike data for {node_set_name} has different lengths on timestamps and node_ids");
+                    }
+                    for (id, ts) in nodes.iter().zip(times.iter()) {
+                        data.entry(*id as u64).or_default().push(*ts);
+                    }
+                }
+            }
+            else {
+                bail!("NodeSet on spikes must be a named reference, is {node_set:?}");
+            }
+        }
+    }
+    Ok(res)
+}
+
+fn read_iclamps(inputs: &Map<String, raw::Input>,
+                node_populations: &Vec<PopId>,
+                node_population_ids: &Map<String, usize>) -> Result<Map<u64, Vec<IClamp>>> {
+    let mut iclamps: Map<u64, Vec<IClamp>> = Map::new();
+    for (tag, input) in inputs {
+        if let
+            raw::Input::CurrentClamp {
+                amp,
+                delay,
+                duration,
+                node_set,
+                enabled,
+                ..
+            } = input {
+                if !enabled {
+                    continue;
+                }
+                assert!(amp.len() == delay.len());
+                assert!(amp.len() == duration.len());
+
+                let gids = resolve_nodeset(
+                    node_set.as_ref().ok_or_else(|| anyhow!("No nodeset given."))?,
+                    node_populations,
+                    node_population_ids,
+                )?;
+                for gid in gids.into_iter() {
+                    for ix in 0..amp.len() {
+                        let ic = IClamp {
+                            amplitude_nA: amp[ix],
+                            delay_ms: delay[ix],
+                            duration_ms: duration[ix],
+                            tag: tag.clone(),
+                            location: String::from("(location 0 0.5)"), // TODO Placeholder
+                        };
+
+                        iclamps.entry(gid).or_default().push(ic)
+                    }
+                }
+            }
+    }
+    Ok(iclamps)
 }
 
 impl Simulation {
@@ -718,7 +793,6 @@ impl Simulation {
                 }
                 start += population.size;
             }
-            println!("gid={gid} lid={lid} list={node_list:?}");
         }
         let mut reports: Map<u64, Vec<Probe>> = Map::new();
         for raw::Report {
@@ -733,85 +807,38 @@ impl Simulation {
                 continue;
             }
             let gids = resolve_nodeset(cells, &node_populations, &node_population_ids)?;
-            let kind = if !sections.is_empty() {
-                match &sections[..] {
-                    [] => continue,
-                    vs => ProbeKind::Cable(vs.to_vec()),
+            let probe = if !sections.is_empty() {
+                let sections = sections.clone();
+                if variable_name == "v" {
+                    Probe::CableVoltage(sections)
+                } else if variable_name.ends_with('i') { // TODO this is nasty, what if a STATE ends in i/o?!
+                    Probe::CableIntConc(variable_name.clone(), sections)
+                } else if variable_name.ends_with('o') {
+                    Probe::CableExtConc(variable_name.clone(), sections)
+                } else {
+                    Probe::CableState(variable_name.clone(), sections)
                 }
+            } else if variable_name == "v" {
+                Probe::Lif
             } else {
-                ProbeKind::Lif
-            };
-            let variable = if variable_name == "v" {
-                "membrane_voltage".to_string()
-            } else {
-                bail!("No clue how to probe {}", variable_name);
+                bail!("No clue how to probe {variable_name} on LIF cells.");
             };
             for gid in gids {
-                let probe = Probe {
-                    variable: variable.clone(),
-                    kind: kind.clone(),
-                };
-                reports.entry(gid).or_default().push(probe);
+                reports.entry(gid).or_default().push(probe.clone());
             }
         }
 
-        let mut iclamps: Map<u64, Vec<IClamp>> = Map::new();
-        for (tag, input) in &sim.inputs {
-            match input {
-                raw::Input::CurrentClamp {
-                    amp,
-                    delay,
-                    duration,
-                    node_set,
-                    enabled,
-                    ..
-                } => {
-                    if !enabled {
-                        continue;
-                    }
-                    assert!(amp.len() == delay.len());
-                    assert!(amp.len() == duration.len());
 
-                    let gids = resolve_nodeset(
-                        node_set.as_ref().ok_or_else(|| anyhow!("No nodeset given."))?,
-                        &node_populations,
-                        &node_population_ids,
-                    )?;
-                    for gid in gids.into_iter() {
-                        for ix in 0..amp.len() {
-                            let ic = IClamp {
-                                amplitude_nA: amp[ix],
-                                delay_ms: delay[ix],
-                                duration_ms: duration[ix],
-                                tag: tag.clone(),
-                                location: String::from("(location 0 0.5)"), // TODO Placeholder
-                            };
-
-                            iclamps.entry(gid).or_default().push(ic)
-                        }
-                    }
-                }
-                raw::Input::Spikes {
-                    module,
-                    input_file,
-                    node_set,
-                } => {
-                    // let gids = resolve_nodeset(
-                    // node_set,
-                    // &node_populations,
-                    // &node_population_ids,
-                    // );
-                    println!("Spike input module={module:?} file={input_file:?} nodes={node_set:?}")
-                }
-                _ => bail!("No idea how to translate {input:?} to Arbor"),
-            }
-        }
 
         let cv_policy = if let Some(d) = sim.run.dl {
             CVPolicy::MaxExtent(d)
         } else {
             CVPolicy::Default
         };
+
+        let virtual_spikes = read_virtual_spikes(&sim.components, &sim.inputs)?;
+        let iclamps = read_iclamps(&sim.inputs, &node_populations, &node_population_ids)?;
+
         Ok(Self {
             tfinal: sim.run.tstop,
             dt: sim.run.dt,
@@ -824,6 +851,7 @@ impl Simulation {
             reports,
             iclamps,
             cv_policy,
+            virtual_spikes,
             size: start,
             spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
         })
@@ -833,7 +861,6 @@ impl Simulation {
         let mut incoming_edges = Vec::new();
         for edge_list in &self.edge_lists {
             for edge_population in edge_list.populations.iter().filter(|p| p.target_pop == target_population) {
-
                     for (edge_index, _) in edge_population
                         .target_ids
                         .iter()

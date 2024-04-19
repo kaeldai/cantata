@@ -7,8 +7,9 @@ use std::{
 use crate::{
     err::{anyhow, Context, Result},
     Map,
+    sup::{Manifest, Components, resolve_manifest},
 };
-use anyhow::bail;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -252,12 +253,23 @@ pub enum Input {
     Movie { module: String },
 }
 
-type Inputs = Map<String, Input>;
+impl Input {
+    fn resolve_manifest(&mut self, manifest: &Manifest, base: &Path) -> Result<()> {
+        match self {
+            Input::Spikes { input_file, .. } =>
+                input_file.iter_mut().try_for_each(|i| resolve_manifest(i, manifest, base)),
+            Input::NWB { file, .. } => resolve_manifest(file, manifest, base),
+            Input::LFP { positions_file, mesh_files_dir, .. } => {
+                resolve_manifest(positions_file, manifest, base)?;
+                resolve_manifest(mesh_files_dir, manifest, base)
+            }
+            Input::CSV { file: Some(file), .. } => resolve_manifest(file, manifest, base),
+            _ => Ok(())
+        }
+    }
+}
 
-/// $key = value; used to resolve file paths
-type Manifest = Map<String, String>;
-
-type Components = Map<String, String>;
+pub type Inputs = Map<String, Input>;
 
 /// Sort spikes by...
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -302,36 +314,6 @@ pub struct Edges {
     pub edges: String,
     #[serde(rename = "edge_types_file")]
     pub types: String,
-}
-
-fn resolve_manifest(val: &mut String, manifest: &Manifest, base: &Path) -> Result<()> {
-    // Recursively replace $key with values from manifest
-    'a: loop {
-        // Strip out {} to reduce ${key} to $key
-        *val = val.replace(['{', '}'], "");
-        for (k, v) in manifest {
-            if val.contains(k) {
-                *val = val.replace(k, v);
-                continue 'a;
-            }
-        }
-        if val.contains('$') {
-            bail!("Unresolved marker: {val}; manifest={manifest:?}");
-        }
-        break;
-    }
-    // Replace './' with the top-level of the simulation file
-    if val.starts_with("./") {
-        *val = format!(
-            "{}/{}",
-            base.to_str().unwrap(),
-            val.strip_prefix("./").unwrap()
-        );
-    }
-    if !val.starts_with('/') {
-        *val = format!("{}/{}", base.to_str().unwrap(), val);
-    }
-    Ok(())
 }
 
 impl Edges {
@@ -466,6 +448,7 @@ impl Simulation {
         raw.components
             .iter_mut()
             .try_for_each(|(_, it)| resolve_manifest(it, &raw.manifest, base_dir))?;
+        raw.components.insert("base_dir".into(), base_dir.to_str().unwrap().into());
 
         // Resolve the Network to an object
         let mut network = match raw.network {
@@ -506,6 +489,9 @@ impl Simulation {
             }
             raw.node_sets
         };
+
+        raw.inputs.values_mut()
+                  .try_for_each(|i| i.resolve_manifest(&raw.manifest, base_dir))?;
 
         Ok(Simulation {
             run: raw.run,

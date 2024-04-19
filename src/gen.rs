@@ -1,7 +1,7 @@
 use crate::{
     err::Result,
     fit::Attribute,
-    sim::{CVPolicy, IClamp, ModelType, Probe, ProbeKind, Simulation},
+    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation},
     Map,
 };
 use anyhow::bail;
@@ -45,6 +45,10 @@ pub struct Bundle {
     pub spike_threshold: f64,
     /// sparse map of gids to LIF cell descrption. Valid iff kind(gid) == LIF
     pub gid_to_lif: Map<usize, Map<String, f64>>,
+    /// sparse map of gids to virtual cell spike trains. Valid iff kind(gid) == Virtual
+    /// Will generate SpikeSource cells in Arbor
+    pub gid_to_vrt: Map<usize, Vec<f64>>,
+
 }
 
 const KIND_CABLE: u64 = 0;
@@ -57,6 +61,9 @@ impl Bundle {
         let mut acc_to_cid = Map::new();
         let mut mrf_to_mid = Map::new();
 
+        // Collected virtual spike trains
+        // let mut spike_inputs = Map::new();
+
         // Look up tables to write out
         let mut cell_bio_ids = Map::new();
         let mut morphology = Vec::new();
@@ -67,6 +74,7 @@ impl Bundle {
         let mut current_clamps = Map::new();
         let mut probes = Map::new();
         let mut gid_to_lif = Map::new();
+        let mut gid_to_vrt = Map::new();
         for gid in 0..sim.size {
             let node = sim.reify_node(gid)?;
             if !node.incoming_edges.is_empty() {
@@ -152,12 +160,18 @@ impl Bundle {
                         t => bail!("Unknown model template <{t}> for gid {gid}"),
                     }
                 }
-                ModelType::Virtual { .. } => {
+                ModelType::Virtual { .. } => { // The fields are largely irrelevant here
+                    let data: &mut Vec<f64> = gid_to_vrt.entry(gid).or_default();
+                    if let Some(group) = sim.virtual_spikes.get(&node.pop) {
+
+                        if let Some(ts) = group.get(&node.node_id) {
+                            data.append(&mut ts.clone());
+                        }
+                    }
                     cell_kind.push(KIND_SOURCE);
                 }
-                ModelType::Point { model_template, attributes } => {
+                ModelType::Point { model_template, .. } => {
                     cell_kind.push(KIND_LIF);
-                    println!("template={model_template:?} attributes={attributes:?} params={:?}", node.dynamics);
                     match model_template.as_ref() {
                         "nrn:IntFire1" => {
                             // Taken from nrn/IntFire1.mod and adapted to Arbor.
@@ -208,17 +222,30 @@ impl Bundle {
 
         for (gid, sim_probes) in &sim.reports {
             let mut prbs = Vec::new();
-            for Probe { variable, kind } in sim_probes {
-                match kind {
-                    ProbeKind::Cable(ls) => {
+            for probe in sim_probes {
+                match probe {
+                    Probe::CableVoltage(ls) => {
                         for l in ls {
-                            let tag = format!("prb-{variable}@{l}");
-                            prbs.push((Some(l.clone()), variable.clone(), tag));
+                            prbs.push((Some(l.clone()), "voltage".into(), format!("prb-voltage@{l}")));
                         }
                     }
-                    ProbeKind::Lif => {
-                        let tag = format!("prb-{variable}");
-                        prbs.push((None, variable.clone(), tag.clone()));
+                    Probe::Lif => {
+                        prbs.push((None, "voltage".into(), "prb-voltage".into()));
+                    }
+                    Probe::CableIntConc(ion, ls) => {
+                        for l in ls {
+                            prbs.push((Some(l.clone()), ion.clone(), format!("prb-{ion}@{l}")));
+                        }
+                    }
+                    Probe::CableState(var, ls) => {
+                        for l in ls {
+                            prbs.push((Some(l.clone()), var.clone(), format!("prb-{var}@{l}")));
+                        }
+                    }
+                    Probe::CableExtConc(ion, ls) => {
+                        for l in ls {
+                            prbs.push((Some(l.clone()), ion.clone(), format!("prb-{ion}@{l}")));
+                        }
                     }
                 }
             }
@@ -245,6 +272,7 @@ impl Bundle {
             current_clamps,
             spike_threshold: sim.spike_threshold,
             gid_to_lif,
+            gid_to_vrt,
         })
     }
 }
