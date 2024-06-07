@@ -5,6 +5,7 @@ from arbor import units as U
 import pandas as pd
 from json import load as load_data
 import matplotlib.pyplot as plt
+from time import perf_counter as pc
 
 from pathlib import Path
 
@@ -166,16 +167,25 @@ class recipe(A.recipe):
         return A.spike_source_cell("src",
                                    A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]]))
 
+t0 = pc()
 rec = recipe()
+t1 = pc()
 sim = A.simulation(rec)
+t2 = pc()
+sim.record(A.spike_recording.all)
 
 schedule = A.regular_schedule(tstart=0*U.ms, dt=10*rec.dt*U.ms)
 handles = { (gid, tag): sim.sample((gid, tag), schedule=schedule)
             for gid, prbs in rec.gid_to_prb.items()
             for _, _, tag in prbs}
-
+t3 = pc()
 sim.run(rec.T*U.ms, rec.dt*U.ms)
-
+t4 = pc()
+with open(here / 'out' / f'spikes.csv', 'w') as fd:
+    print(f"time,gid,lid", file=fd)
+    for (gid, lid), time in sim.spikes():
+        print(f"{time:.3f},{gid:d},{lid:d}", file=fd)
+t5 = pc()
 for (gid, tag), handle in handles.items():
     dfs = []
     for data, meta in sim.samples(handle):
@@ -192,3 +202,5 @@ for (gid, tag), handle in handles.items():
     fg, ax = plt.subplots()
     df.plot(ax=ax)
     fg.savefig(here / 'out' / f'gid_{gid}-tag_{tag}.pdf')
+t6 = pc()
+print(f"Stats recipe={t1 - t0:.3}s simulation={t2 - t1:.3}s sampling={t3 - t2:.3}s run={t4 - t3:.3}s spikes={t5 - t4:.3}s samples={t6 - t5:.3}s")
