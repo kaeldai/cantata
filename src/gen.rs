@@ -1,7 +1,7 @@
 use crate::{
     err::Result,
     fit::Attribute,
-    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation},
+    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Edge},
     Map,
 };
 use anyhow::bail;
@@ -55,6 +55,22 @@ const KIND_CABLE: u64 = 0;
 const KIND_LIF: u64 = 1;
 const KIND_SOURCE: u64 = 2;
 
+fn fix_edge(edge: &Edge) -> Result<Edge> {
+    if edge.mech.is_none() {
+        bail!("Edge requires associated dynamics, but we found none.");
+    }
+    let mut edge = edge.clone();
+    let mech = edge.mech.as_ref().unwrap();
+    if mech == "Exp2Syn" {
+        edge.mech = Some("exp2syn".to_string());
+        if let Some(v) = edge.dynamics.get("erev") {
+            edge.dynamics.insert("e".to_string(), *v);
+            edge.dynamics.remove("erev");
+        }
+    }
+    Ok(edge)
+}
+
 impl Bundle {
     pub fn new(sim: &Simulation) -> Result<Self> {
         // Reverse lookup tables, used internally for uniqueness and index generation.
@@ -90,12 +106,10 @@ impl Bundle {
                             edge.weight,
                             edge.delay,
                         ));
+                        let edge = fix_edge(edge)?;
                         syn.push((
                             String::from("(location 0 0.5)"),
-                            edge.mech
-                                .as_ref()
-                                .expect("Needed a synapse kind.")
-                                .to_string(),
+                            edge.mech.unwrap().to_string(),
                             edge.dynamics.clone(),
                             tgt,
                         ));

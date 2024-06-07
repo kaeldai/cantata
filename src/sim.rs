@@ -494,7 +494,7 @@ impl EdgeList {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Edge {
     pub src_gid: u64,
     pub mech: Option<String>,
