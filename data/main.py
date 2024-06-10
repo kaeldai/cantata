@@ -159,7 +159,7 @@ class recipe(A.recipe):
         cell.E_L = data['U_neutral'] * U.mV
         cell.E_R = data['U_reset'] * U.mV
         cell.V_m = data['U_0'] * U.mV
-        cell.V_th = self.threshold * U.mV
+        cell.V_th = data['U_th'] * U.mV
         cell.t_ref = data['t_ref'] * U.ms
         return cell
 
@@ -181,10 +181,12 @@ handles = { (gid, tag): sim.sample((gid, tag), schedule=schedule)
 t3 = pc()
 sim.run(rec.T*U.ms, rec.dt*U.ms)
 t4 = pc()
-with open(here / 'out' / f'spikes.csv', 'w') as fd:
-    print(f"time,gid,lid", file=fd)
-    for (gid, lid), time in sim.spikes():
-        print(f"{time:.3f},{gid:d},{lid:d}", file=fd)
+spikes = sim.spikes()
+df = pd.DataFrame({"time": spikes["time"],
+                   "gid": spikes['source']['gid'],
+                   "lid": spikes['source']['index']})
+df['kind'] = df['gid'].map(lambda i: rec.gid_to_kid[i])
+df.to_csv(here / 'out' / 'spikes.csv')
 t5 = pc()
 for (gid, tag), handle in handles.items():
     dfs = []
