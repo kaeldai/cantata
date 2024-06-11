@@ -59,6 +59,8 @@ class recipe(A.recipe):
             self.cid_to_acc = data['decoration']
             # gid -> cell kind
             self.gid_to_kid = data['cell_kind']
+            # gid -> cell metadata
+            self.gid_to_meta = data['metadata']
             # gid -> incoming connections
             self.gid_to_inc = { int(k): v for k, v in data['incoming_connections'].items() }
             # gid -> synapse
@@ -154,7 +156,7 @@ class recipe(A.recipe):
         cell = A.lif_cell('src', 'tgt')
         data = self.gid_to_lif[gid]
         # setup the cell to adhere to NEURON's defaults
-        cell.C_m = data['cm'] * U.pF
+        cell.C_m = 0.4950000196695328 * data['cm'] * U.pF
         cell.tau_m = data['tau'] * U.ms
         cell.E_L = data['U_neutral'] * U.mV
         cell.E_R = data['U_reset'] * U.mV
@@ -186,6 +188,8 @@ df = pd.DataFrame({"time": spikes["time"],
                    "gid": spikes['source']['gid'],
                    "lid": spikes['source']['index']})
 df['kind'] = df['gid'].map(lambda i: rec.gid_to_kid[i])
+df['population'] = df['gid'].map(lambda i: rec.gid_to_meta[i]["population"])
+df['type'] = df['gid'].map(lambda i: rec.gid_to_meta[i]["type_id"])
 df.to_csv(here / 'out' / 'spikes.csv')
 t5 = pc()
 for (gid, tag), handle in handles.items():
@@ -205,4 +209,54 @@ for (gid, tag), handle in handles.items():
     df.plot(ax=ax)
     fg.savefig(here / 'out' / f'gid_{gid}-tag_{tag}.pdf')
 t6 = pc()
-print(f"Stats recipe={t1 - t0:.3}s simulation={t2 - t1:.3}s sampling={t3 - t2:.3}s run={t4 - t3:.3}s spikes={t5 - t4:.3}s samples={t6 - t5:.3}s")
+
+cells = {}
+pops = {}
+N = rec.num_cells()
+
+for gid in range(N):
+    meta = rec.gid_to_meta[gid]
+    pop = meta['population']
+    kind = meta['type_id']
+    if not pop in cells:
+        cells[pop] = {}
+        pops[pop] = 0
+    if not kind in cells[pop]:
+        cells[pop][kind] = 0
+    cells[pop][kind] += 1
+    pops[pop] += 1
+
+conns = {}
+for gid in range(N):
+    tgt = rec.gid_to_meta[gid]['population']
+    for conn in rec.connections_on(gid):
+        src = rec.gid_to_meta[conn.source.gid]['population']
+        key = (src, tgt)
+        if not key in conns:
+            conns[key] = 0
+        conns[key] += 1
+
+print(f"""
+Statistics
+==========
+
+* Cells                  {N:>13}""")
+for pop, vals in cells.items():
+    print(f"  * {pop:<20} {pops[pop]:>13}")
+    for kind, num in vals.items():
+        print(f"    * {kind:<18} {num:>13}")
+print(f"* Connections            {sum(conns.values()):>13}")
+for (src, tgt), num in conns.items():
+    print(f"  * {src:<8} -> {tgt:<8} {num:>13}")
+
+print(f"""* Spikes                 {len(spikes):>13}
+* Runtime                {t6 - t0:>13.3f}s
+  * building             {t3 - t0:>13.3f}s
+    * recipe             {t1 - t0:>13.3f}s
+    * simulation         {t2 - t1:>13.3f}s
+    * sampling           {t3 - t2:>13.3f}s
+  * run                  {t4 - t3:>13.3f}s
+  * output               {t6 - t4:>13.3f}s
+    * spikes             {t5 - t4:>13.3f}s
+    * samples            {t6 - t5:>13.3f}s
+""")

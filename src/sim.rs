@@ -104,6 +104,15 @@ impl NodeType {
             }
         }
     }
+
+    pub fn attributes(&self) -> &Map<String, Attribute> {
+        match &self.model_type {
+            ModelType::Biophysical { attributes, .. }
+            | ModelType::Single { attributes, .. }
+            | ModelType::Point { attributes, .. }
+            | ModelType::Virtual { attributes } => attributes
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -917,7 +926,7 @@ impl Simulation {
                                     edge_population.name
                                 )
                             })?;
-
+                        // index into group for this edge
                         let group_index = *edge_population
                             .group_indices
                             .get(edge_index)
@@ -1034,11 +1043,16 @@ impl Simulation {
         for (k, vs) in &group.dynamics {
             dynamics.insert(k.to_string(), vs[group_index]);
         }
-        let custom = group
-            .custom
-            .iter()
-            .map(|(k, vs)| (k.to_string(), vs[group_index]))
-            .collect();
+
+        let mut custom = Map::new();
+        for (k, v) in node_type.attributes() {
+            if let Attribute::Float(v) = v {
+                custom.insert(k.to_string(), *v);
+            }
+        }
+        for (k, vs) in group.custom.iter() {
+                custom.insert(k.to_string(), vs[group_index]);
+        }
 
         let incoming_edges = self.reify_edges(&node_population.name, *node_id)?;
 

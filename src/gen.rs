@@ -1,7 +1,7 @@
 use crate::{
     err::Result,
     fit::Attribute,
-    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Edge},
+    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Edge, Node},
     Map,
 };
 use anyhow::bail;
@@ -13,6 +13,35 @@ type ConnectionData = (usize, String, String, f64, f64);
 type ProbeData = (Option<String>, String, String);
 type SynapseData = (String, String, Map<String, f64>, String);
 type IClampData = (String, f64, f64, f64, String);
+
+/// Metadata about cell,
+/// mostly info discarded during generation
+#[derive(Debug, Serialize)]
+pub struct CellMetaData {
+    /// cell kind
+    pub kind: String,
+    /// population name
+    pub population: String,
+    /// cell type label
+    pub type_id: u64,
+
+}
+
+impl CellMetaData {
+    pub fn from(node: &Node) -> Self {
+        let kind = match node.node_type.model_type {
+            ModelType::Biophysical { .. } => String::from("biophys"),
+            ModelType::Single { .. } => String::from("single"),
+            ModelType::Point { .. } => String::from("point"),
+            ModelType::Virtual { .. } => String::from("virtual"),
+        };
+        Self {
+            population: node.pop.to_string(),
+            kind,
+            type_id: node.node_type.type_id
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Bundle {
@@ -48,7 +77,8 @@ pub struct Bundle {
     /// sparse map of gids to virtual cell spike trains. Valid iff kind(gid) == Virtual
     /// Will generate SpikeSource cells in Arbor
     pub gid_to_vrt: Map<usize, Vec<f64>>,
-
+    /// dense map of gids to metadata
+    pub metadata: Vec<CellMetaData>,
 }
 
 const KIND_CABLE: u64 = 0;
@@ -61,13 +91,13 @@ fn fix_edge(edge: &Edge) -> Result<Edge> {
     }
     let mut edge = edge.clone();
     let mech = edge.mech.as_ref().unwrap();
-    if mech == "Exp2Syn" {
-        edge.mech = Some("exp2syn".to_string());
-        if let Some(v) = edge.dynamics.get("erev") {
-            edge.dynamics.insert("e".to_string(), *v);
-            edge.dynamics.remove("erev");
-        }
-    }
+    // if mech == "Exp2Syn" {
+        // edge.mech = Some("exp2syn".to_string());
+        // if let Some(v) = edge.dynamics.get("erev") {
+            // edge.dynamics.insert("e".to_string(), *v);
+            // edge.dynamics.remove("erev");
+        // }
+    // }
     Ok(edge)
 }
 
@@ -77,10 +107,8 @@ impl Bundle {
         let mut acc_to_cid = Map::new();
         let mut mrf_to_mid = Map::new();
 
-        // Collected virtual spike trains
-        // let mut spike_inputs = Map::new();
-
         // Look up tables to write out
+        let mut gid_to_meta = Vec::new();
         let mut cell_bio_ids = Map::new();
         let mut morphology = Vec::new();
         let mut decoration = Vec::new();
@@ -93,6 +121,7 @@ impl Bundle {
         let mut gid_to_vrt = Map::new();
         for gid in 0..sim.size {
             let node = sim.reify_node(gid)?;
+            gid_to_meta.push(CellMetaData::from(&node));
             if !node.incoming_edges.is_empty() {
                 if matches!(node.node_type.model_type, ModelType::Biophysical { .. }) {
                     let mut inc = Vec::new();
@@ -288,6 +317,7 @@ impl Bundle {
             spike_threshold: sim.spike_threshold,
             gid_to_lif,
             gid_to_vrt,
+            metadata: gid_to_meta,
         })
     }
 }
