@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from collections import defaultdict
 import arbor as A
 from arbor import units as U
 import pandas as pd
@@ -37,7 +38,10 @@ def load_morphology(path):
 class recipe(A.recipe):
     def __init__(self):
         A.recipe.__init__(self)
+        # Global cable cell settings
         self.cv_policy = A.cv_policy_single()
+        self.cable_props = A.neuron_cable_properties()
+        self.cable_props.catalogue.extend(A.allen_catalogue(), '')
         with open(here / 'dat/sim.json', 'rb') as fd:
             data = load_data(fd)
             # Some initial, global data
@@ -69,9 +73,12 @@ class recipe(A.recipe):
             self.gid_to_icp = { int(k): v for k, v in data['current_clamps'].items() }
             # probes
             self.gid_to_prb = { int(k): v for k, v in data['probes'].items() }
-        # Global cable cell settings
-        self.cable_props = A.neuron_cable_properties()
-        self.cable_props.catalogue.extend(A.allen_catalogue(), '')
+            globals = data['cable_cell_globals']
+            self.kind_to_count = data['count_by_kind']
+            if globals:
+                self.cable_props.set_property(Vm=globals["v_init"] * U.mV, tempK=globals["celsius"] * U.Celsius)
+        self.cable_data = {}
+
 
     def cell_kind(self, gid):
         kind = self.gid_to_kid[gid]
@@ -135,10 +142,7 @@ class recipe(A.recipe):
         return res
 
     def make_cable_cell(self, gid):
-        mid, cid = self.gid_to_bio[gid]
-        mrf = load_morphology(here / 'mrf' / self.mid_to_mrf[mid])
-        acc = self.cid_to_acc[cid]
-        dec = A.load_component(here / 'acc' / acc).component
+        mrf, dec = self.load_cable_data(gid)
         lbl = A.label_dict().add_swc_tags()
         # NOTE in theory we could have more and in other places...
         dec.place('(location 0 0.5)', A.threshold_detector(self.threshold * U.mV), 'src')
@@ -156,7 +160,7 @@ class recipe(A.recipe):
         cell = A.lif_cell('src', 'tgt')
         data = self.gid_to_lif[gid]
         # setup the cell to adhere to NEURON's defaults
-        cell.C_m = 0.4950000196695328 * data['cm'] * U.pF
+        cell.C_m = 0.6*data['cm'] * U.pF
         cell.tau_m = data['tau'] * U.ms
         cell.E_L = data['U_neutral'] * U.mV
         cell.E_R = data['U_reset'] * U.mV
@@ -169,10 +173,30 @@ class recipe(A.recipe):
         return A.spike_source_cell("src",
                                    A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]]))
 
+    def load_cable_data(self, gid):
+        mid, cid = self.gid_to_bio[gid]
+        if not gid in self.cable_data:
+            t0 = pc()
+            mrf = load_morphology(here / 'mrf' / self.mid_to_mrf[mid])
+            dec = A.load_component(here / 'acc' / self.cid_to_acc[cid]).component
+            self.cable_data[gid] = (mrf, dec)
+            t1 = pc()
+            self.io += t1 - t0
+        mrf, dec = self.cable_data[gid]
+        return mrf, A.decor(dec) # NOTE copy that decor!!
+
 t0 = pc()
 rec = recipe()
 t1 = pc()
-sim = A.simulation(rec)
+ctx = A.context()
+print(ctx)
+hints = {}
+for kind, tag in zip([A.cell_kind.cable, A.cell_kind.lif, A.cell_kind.spike_source], [0, 1, 2]):
+    hints[kind] = A.partition_hint(cpu_group_size=rec.kind_to_count[tag]/ctx.threads)
+ddc = A.partition_load_balance(rec, ctx, hints)
+print(ctx)
+print(ddc)
+sim = A.simulation(rec, context=ctx, domains=ddc)
 t2 = pc()
 sim.record(A.spike_recording.all)
 
@@ -210,53 +234,61 @@ for (gid, tag), handle in handles.items():
     fg.savefig(here / 'out' / f'gid_{gid}-tag_{tag}.pdf')
 t6 = pc()
 
-cells = {}
-pops = {}
 N = rec.num_cells()
+
+cells = defaultdict(lambda: defaultdict(lambda: 0))
+spike = defaultdict(lambda: defaultdict(lambda: 0))
+conns = defaultdict(lambda: 0)
 
 for gid in range(N):
     meta = rec.gid_to_meta[gid]
     pop = meta['population']
     kind = meta['type_id']
-    if not pop in cells:
-        cells[pop] = {}
-        pops[pop] = 0
-    if not kind in cells[pop]:
-        cells[pop][kind] = 0
     cells[pop][kind] += 1
-    pops[pop] += 1
-
-conns = {}
-for gid in range(N):
-    tgt = rec.gid_to_meta[gid]['population']
+    cells[pop][-1] += 1
     for conn in rec.connections_on(gid):
         src = rec.gid_to_meta[conn.source.gid]['population']
-        key = (src, tgt)
-        if not key in conns:
-            conns[key] = 0
-        conns[key] += 1
+        conns[(src, pop)] += 1
+
+for (gid, _), _ in spikes:
+    meta = rec.gid_to_meta[gid]
+    pop = meta['population']
+    kind = meta['type_id']
+    spike[pop][kind] += 1
+    spike[pop][-1] += 1
+C = sum(conns.values())
+t7 = pc()
 
 print(f"""
 Statistics
 ==========
 
 * Cells                  {N:>13}""")
-for pop, vals in cells.items():
-    print(f"  * {pop:<20} {pops[pop]:>13}")
-    for kind, num in vals.items():
+for pop, kinds in cells.items():
+    print(f"  * {pop:<20} {kinds[-1]:>13}")
+    for kind, num in kinds.items():
+        if kind == -1:
+            continue
         print(f"    * {kind:<18} {num:>13}")
-print(f"* Connections            {sum(conns.values()):>13}")
+print(f"* Connections            {C:>13}")
 for (src, tgt), num in conns.items():
     print(f"  * {src:<8} -> {tgt:<8} {num:>13}")
-
-print(f"""* Spikes                 {len(spikes):>13}
-* Runtime                {t6 - t0:>13.3f}s
+print(f"* Spikes                 {len(spikes):>13}")
+for pop, kinds in spike.items():
+    print(f"  * {pop:<20} {kinds[-1]:>13}")
+    for kind, num in kinds.items():
+        if kind == -1:
+            continue
+        print(f"    * {kind:<18} {num:>13}")
+print(f"""* Runtime                {t6 - t0:>13.3f}s
   * building             {t3 - t0:>13.3f}s
     * recipe             {t1 - t0:>13.3f}s
     * simulation         {t2 - t1:>13.3f}s
+      * reading data     {rec.io:>13.3f}s
     * sampling           {t3 - t2:>13.3f}s
   * run                  {t4 - t3:>13.3f}s
   * output               {t6 - t4:>13.3f}s
     * spikes             {t5 - t4:>13.3f}s
     * samples            {t6 - t5:>13.3f}s
+  * statistics           {t7 - t6:>13.3f}s
 """)

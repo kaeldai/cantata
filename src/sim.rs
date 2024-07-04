@@ -506,6 +506,8 @@ impl EdgeList {
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub src_gid: u64,
+    pub source: (u64, f64),
+    pub target: (u64, f64),
     pub mech: Option<String>,
     pub delay: f64,
     pub weight: f64,
@@ -573,6 +575,12 @@ impl PopId {
 }
 
 #[derive(Debug)]
+pub struct GlobalProperties {
+    pub celsius: f64,
+    pub v_init: f64,
+}
+
+#[derive(Debug)]
 pub struct Simulation {
     /// runtime
     pub tfinal: f64,
@@ -603,6 +611,8 @@ pub struct Simulation {
     pub spike_threshold: f64,
     /// virtual cell spikes
     pub virtual_spikes: Map<String, Map<u64, Vec<f64>>>,
+    /// cable cell global properties
+    pub global_properties: Option<GlobalProperties>,
 }
 
 #[derive(Debug, Clone)]
@@ -848,6 +858,12 @@ impl Simulation {
         let virtual_spikes = read_virtual_spikes(&sim.components, &sim.inputs)?;
         let iclamps = read_iclamps(&sim.inputs, &node_populations, &node_population_ids)?;
 
+        let global_properties = if let raw::Conditions::Detailled { celsius, v_init } = sim.conditions {
+            Some(GlobalProperties { celsius, v_init })
+        } else {
+            None
+        };
+
         Ok(Self {
             tfinal: sim.run.tstop,
             dt: sim.run.dt,
@@ -861,6 +877,7 @@ impl Simulation {
             iclamps,
             cv_policy,
             virtual_spikes,
+            global_properties,
             size: start,
             spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
         })
@@ -966,6 +983,68 @@ impl Simulation {
                             None
                         };
 
+                        let tgt_pos = if let Some(ds) = edge_group.custom.get("afferent_swc_pos") {
+                            ds[group_index]
+                        } else if let Some(s) = ty.attributes.get("afferent_swc_pos") {
+                            if let Attribute::Float(s) = s {
+                                *s
+                            } else {
+                                bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                            }
+                        } else {
+                            0.5 // default to centering
+                        };
+
+                        let tgt_id = if let Some(ds) = edge_group.custom.get("afferent_swc_id") {
+                            ds[group_index]
+                        } else if let Some(s) = ty.attributes.get("afferent_swc_id") {
+                            if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
+                                *s
+                            } else {
+                                bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                            }
+                        } else {
+                            0.0 // default to first (=soma?)
+                        } as u64;
+
+                        let src_pos = if let Some(ds) = edge_group.custom.get("efferent_swc_pos") {
+                            ds[group_index]
+                        } else if let Some(s) = ty.attributes.get("efferent_swc_pos") {
+                            if let Attribute::Float(s) = s {
+                                *s
+                            } else {
+                                bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                            }
+                        } else {
+                            0.5 // default to centering
+                        };
+
+                        let src_id = if let Some(ds) = edge_group.custom.get("efferent_swc_id") {
+                            todo!("Edge type {type_id} in population {} has efferent position", edge_population.name);
+                            ds[group_index]
+                        } else if let Some(s) = ty.attributes.get("efferent_swc_id") {
+                            todo!("Edge type {type_id} in population {} has efferent position", edge_population.name);
+                            if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
+                                *s
+                            } else {
+                                bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                            }
+                        } else {
+                            0.0 // default to first (=soma?)
+                        } as u64;
+
                         // Construct dynamics parameters by merging the type level defaults with the group level overrides.
                         let mut dynamics = ty.dynamics.clone();
                         for (k, vs) in &edge_group.dynamics {
@@ -975,6 +1054,8 @@ impl Simulation {
 
                         incoming_edges.push(Edge {
                             src_gid,
+                            source: (src_id, src_pos),
+                            target: (tgt_id, tgt_pos),
                             mech,
                             delay,
                             weight,

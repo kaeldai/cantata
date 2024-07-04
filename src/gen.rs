@@ -1,7 +1,7 @@
 use crate::{
     err::Result,
     fit::Attribute,
-    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Edge, Node},
+    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Node, GlobalProperties},
     Map,
 };
 use anyhow::bail;
@@ -44,6 +44,12 @@ impl CellMetaData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CableGlobalProperties {
+    pub celsius: f64,
+    pub v_init: f64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Bundle {
     pub time: f64,
     pub time_step: f64,
@@ -79,27 +85,15 @@ pub struct Bundle {
     pub gid_to_vrt: Map<usize, Vec<f64>>,
     /// dense map of gids to metadata
     pub metadata: Vec<CellMetaData>,
+    /// cable cell global settings
+    pub cable_cell_globals: Option<CableGlobalProperties>,
+    /// cell counts by kind
+    pub count_by_kind: Map<u64, usize>,
 }
 
 const KIND_CABLE: u64 = 0;
 const KIND_LIF: u64 = 1;
 const KIND_SOURCE: u64 = 2;
-
-fn fix_edge(edge: &Edge) -> Result<Edge> {
-    if edge.mech.is_none() {
-        bail!("Edge requires associated dynamics, but we found none.");
-    }
-    let mut edge = edge.clone();
-    let mech = edge.mech.as_ref().unwrap();
-    // if mech == "Exp2Syn" {
-        // edge.mech = Some("exp2syn".to_string());
-        // if let Some(v) = edge.dynamics.get("erev") {
-            // edge.dynamics.insert("e".to_string(), *v);
-            // edge.dynamics.remove("erev");
-        // }
-    // }
-    Ok(edge)
-}
 
 impl Bundle {
     pub fn new(sim: &Simulation) -> Result<Self> {
@@ -119,6 +113,7 @@ impl Bundle {
         let mut probes = Map::new();
         let mut gid_to_lif = Map::new();
         let mut gid_to_vrt = Map::new();
+        let mut count_by_kind = Map::new();
         for gid in 0..sim.size {
             let node = sim.reify_node(gid)?;
             gid_to_meta.push(CellMetaData::from(&node));
@@ -135,10 +130,10 @@ impl Bundle {
                             edge.weight,
                             edge.delay,
                         ));
-                        let edge = fix_edge(edge)?;
+                        let loc = format!("(on-components {} (segment {}))", edge.target.1, edge.target.0);
                         syn.push((
-                            String::from("(location 0 0.5)"),
-                            edge.mech.unwrap().to_string(),
+                            loc,
+                            edge.mech.as_ref().unwrap().to_string(),
                             edge.dynamics.clone(),
                             tgt,
                         ));
@@ -162,13 +157,13 @@ impl Bundle {
                     incoming_connections.insert(gid, inc);
                 };
             }
-
             match &node.node_type.model_type {
                 ModelType::Biophysical {
                     model_template,
                     attributes,
                 } => {
                     cell_kind.push(KIND_CABLE);
+                    *count_by_kind.entry(KIND_CABLE).or_default() += 1;
                     match model_template.as_ref() {
                         "ctdb:Biophys1.hoc" => {
                             let mid = if let Some(Attribute::String(mrf)) =
@@ -206,15 +201,16 @@ impl Bundle {
                 ModelType::Virtual { .. } => { // The fields are largely irrelevant here
                     let data: &mut Vec<f64> = gid_to_vrt.entry(gid).or_default();
                     if let Some(group) = sim.virtual_spikes.get(&node.pop) {
-
                         if let Some(ts) = group.get(&node.node_id) {
                             data.append(&mut ts.clone());
                         }
                     }
                     cell_kind.push(KIND_SOURCE);
+                    *count_by_kind.entry(KIND_SOURCE).or_default() += 1;
                 }
                 ModelType::Point { model_template, .. } => {
                     cell_kind.push(KIND_LIF);
+                    *count_by_kind.entry(KIND_LIF).or_default() += 1;
                     match model_template.as_ref() {
                         "nrn:IntFire1" => {
                             // Taken from nrn/IntFire1.mod and adapted to Arbor.
@@ -301,6 +297,17 @@ impl Bundle {
             CVPolicy::MaxExtent(l) => Some(*l),
         };
 
+        let cable_cell_globals = if let Some(GlobalProperties { celsius, v_init }) = sim.global_properties {
+            Some(CableGlobalProperties { celsius, v_init })
+        } else {
+            None
+        };
+
+        // Sort all spike sources. Just to be sure...
+        gid_to_vrt.values_mut()
+                  .for_each(|ts| ts.sort_by(|a, b| a.partial_cmp(b)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)));
+
         Ok(Bundle {
             time: sim.tfinal,
             time_step: sim.dt,
@@ -310,9 +317,11 @@ impl Bundle {
             morphology,
             decoration,
             synapses,
+            cable_cell_globals,
             probes,
             incoming_connections,
             cell_kind,
+            count_by_kind,
             current_clamps,
             spike_threshold: sim.spike_threshold,
             gid_to_lif,
