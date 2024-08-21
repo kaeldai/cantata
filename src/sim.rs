@@ -1028,19 +1028,19 @@ impl Simulation {
                             0.5 // default to centering
                         };
 
-                        let src_id = if let Some(ds) = edge_group.custom.get("efferent_swc_id") {
-                            todo!("Edge type {type_id} in population {} has efferent position", edge_population.name);
-                            ds[group_index]
-                        } else if let Some(s) = ty.attributes.get("efferent_swc_id") {
-                            todo!("Edge type {type_id} in population {} has efferent position", edge_population.name);
-                            if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
-                                *s
-                            } else {
-                                bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
-                            }
+                        let src_id = if let Some(_) = edge_group.custom.get("efferent_swc_id") {
+                            bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                            // ds[group_index]
+                        } else if let Some(_) = ty.attributes.get("efferent_swc_id") {
+                            bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                            // if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
+                                // *s
+                            // } else {
+                                // bail!(
+                                    // "Edge type {type_id} in population {} has non-numeric segment position",
+                                    // edge_population.name
+                                // );
+                            // }
                         } else {
                             0.0 // default to first (=soma?)
                         } as u64;

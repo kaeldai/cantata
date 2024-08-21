@@ -4,7 +4,7 @@ use crate::{
     sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Node, GlobalProperties},
     Map,
 };
-use anyhow::bail;
+use anyhow::{bail, anyhow};
 use serde::Serialize;
 
 /// Resources to store in the output.
@@ -88,12 +88,22 @@ pub struct Bundle {
     /// cable cell global settings
     pub cable_cell_globals: Option<CableGlobalProperties>,
     /// cell counts by kind
-    pub count_by_kind: Map<u64, usize>,
+    pub count_by_kind: [usize; 3],
 }
 
 const KIND_CABLE: u64 = 0;
 const KIND_LIF: u64 = 1;
 const KIND_SOURCE: u64 = 2;
+
+const SYNAPSES: &[(&str, &str)] = &[("exp2syn", "Exp2Syn")];
+
+fn fudge_synapse_dynamics(old: &str) -> String {
+    if let Some(rep) = SYNAPSES.iter().find(|p| p.0 == old) {
+        rep.1
+    } else {
+        old
+    }.to_string()
+}
 
 impl Bundle {
     pub fn new(sim: &Simulation) -> Result<Self> {
@@ -113,7 +123,7 @@ impl Bundle {
         let mut probes = Map::new();
         let mut gid_to_lif = Map::new();
         let mut gid_to_vrt = Map::new();
-        let mut count_by_kind = Map::new();
+        let mut count_by_kind = [0; 3];
         for gid in 0..sim.size {
             let node = sim.reify_node(gid)?;
             gid_to_meta.push(CellMetaData::from(&node));
@@ -130,10 +140,12 @@ impl Bundle {
                             edge.weight,
                             edge.delay,
                         ));
+                        let mech = edge.mech.as_ref().ok_or(anyhow!("Edge has no mechanism"))?;
+                        let mech = fudge_synapse_dynamics(mech);
                         let loc = format!("(on-components {} (segment {}))", edge.target.1, edge.target.0);
                         syn.push((
                             loc,
-                            edge.mech.as_ref().unwrap().to_string(),
+                            mech,
                             edge.dynamics.clone(),
                             tgt,
                         ));
@@ -163,7 +175,7 @@ impl Bundle {
                     attributes,
                 } => {
                     cell_kind.push(KIND_CABLE);
-                    *count_by_kind.entry(KIND_CABLE).or_default() += 1;
+                    count_by_kind[KIND_CABLE as usize] += 1;
                     match model_template.as_ref() {
                         "ctdb:Biophys1.hoc" => {
                             let mid = if let Some(Attribute::String(mrf)) =
@@ -206,11 +218,11 @@ impl Bundle {
                         }
                     }
                     cell_kind.push(KIND_SOURCE);
-                    *count_by_kind.entry(KIND_SOURCE).or_default() += 1;
+                    count_by_kind[KIND_SOURCE as usize] += 1;
                 }
                 ModelType::Point { model_template, .. } => {
                     cell_kind.push(KIND_LIF);
-                    *count_by_kind.entry(KIND_LIF).or_default() += 1;
+                    count_by_kind[KIND_LIF as usize] += 1;
                     match model_template.as_ref() {
                         "nrn:IntFire1" => {
                             // Taken from nrn/IntFire1.mod and adapted to Arbor.
