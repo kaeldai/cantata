@@ -7,10 +7,22 @@ import pandas as pd
 from json import load as load_data
 import matplotlib.pyplot as plt
 from time import perf_counter as pc
-
+import re
 from pathlib import Path
 
 here = Path(__file__).parent
+
+have_timing = True
+have_stats = True
+
+# check arbor version
+ver = re.match(r'(\d+)\.(\d+)\.(\d+)(-\w+)?', A.__version__)
+if ver:
+    mj, mn, pt, sf = ver.groups()
+    assert 10000 <= (int(mj)*1000 + int(mn))*1000 + int(pt) <= 11000, "Arbor version 0.10.x is required."
+else:
+    print(f"Couldn't parse version {A.__version__}")
+    exit(-42)
 
 def load_morphology(path):
     sfx = path.suffix
@@ -34,6 +46,24 @@ def load_morphology(path):
     else:
         raise RuntimeError(f"Unknown morphology file type {sfx}")
 
+if have_timing:
+    class Timing:
+        def __init__(self):
+            self.timings = defaultdict(lambda: 0.0)
+        def tic(self, key):
+            self.timings[key] -= pc()
+        def toc(self, key):
+            self.timings[key] += pc()
+else:
+    class Timing:
+        def __init__(self):
+            pass
+        def tic(self, key):
+            pass
+        def toc(self, key):
+            pass
+
+timing = Timing()
 
 class recipe(A.recipe):
     def __init__(self):
@@ -176,37 +206,42 @@ class recipe(A.recipe):
     def load_cable_data(self, gid):
         mid, cid = self.gid_to_bio[gid]
         if not gid in self.cable_data:
-            t0 = pc()
+            timing.tic('build/simulation/io')
             mrf = load_morphology(here / 'mrf' / self.mid_to_mrf[mid])
             dec = A.load_component(here / 'acc' / self.cid_to_acc[cid]).component
             self.cable_data[gid] = (mrf, dec)
-            t1 = pc()
-            self.io += t1 - t0
+            timing.toc('build/simulation/io')
         mrf, dec = self.cable_data[gid]
         return mrf, A.decor(dec) # NOTE copy that decor!!
 
-t0 = pc()
+timing.tic('build/recipe')
 rec = recipe()
-t1 = pc()
+timing.toc('build/recipe')
+
+timing.tic('build/simulation')
 ctx = A.context()
-print(ctx)
 hints = {}
 for kind, tag in zip([A.cell_kind.cable, A.cell_kind.lif, A.cell_kind.spike_source], [0, 1, 2]):
-    hints[kind] = A.partition_hint(cpu_group_size=rec.kind_to_count[tag]/ctx.threads)
+    if tag in rec.kind_to_count:
+        hints[kind] = A.partition_hint(cpu_group_size=rec.kind_to_count[tag]/ctx.threads)
 ddc = A.partition_load_balance(rec, ctx, hints)
-print(ctx)
-print(ddc)
 sim = A.simulation(rec, context=ctx, domains=ddc)
-t2 = pc()
+timing.toc('build/simulation')
+
+timing.tic('build/sampling')
 sim.record(A.spike_recording.all)
 
 schedule = A.regular_schedule(tstart=0*U.ms, dt=10*rec.dt*U.ms)
 handles = { (gid, tag): sim.sample((gid, tag), schedule=schedule)
             for gid, prbs in rec.gid_to_prb.items()
             for _, _, tag in prbs}
-t3 = pc()
+timing.toc('build/sampling')
+
+timing.tic('run')
 sim.run(rec.T*U.ms, rec.dt*U.ms)
-t4 = pc()
+timing.toc('run')
+
+timing.tic('output/spikes')
 spikes = sim.spikes()
 df = pd.DataFrame({"time": spikes["time"],
                    "gid": spikes['source']['gid'],
@@ -215,7 +250,9 @@ df['kind'] = df['gid'].map(lambda i: rec.gid_to_kid[i])
 df['population'] = df['gid'].map(lambda i: rec.gid_to_meta[i]["population"])
 df['type'] = df['gid'].map(lambda i: rec.gid_to_meta[i]["type_id"])
 df.to_csv(here / 'out' / 'spikes.csv')
-t5 = pc()
+timing.toc('output/spikes')
+
+timing.tic('output/samples')
 for (gid, tag), handle in handles.items():
     dfs = []
     for data, meta in sim.samples(handle):
@@ -225,6 +262,9 @@ for (gid, tag), handle in handles.items():
         else:
             columns.append(str(meta))
         dfs.append(pd.DataFrame(data=data[:, 1:], columns=columns, index=data[:, 0]))
+    if not dfs:
+        print(f"[WARN] No data collected for tag '{tag}' on cell {gid}")
+        continue
     df = pd.concat(dfs, axis=1)
     df.index.name = 't/ms'
     df.to_csv(here / 'out' / f'gid_{gid}-tag_{tag}.csv')
@@ -232,63 +272,77 @@ for (gid, tag), handle in handles.items():
     fg, ax = plt.subplots()
     df.plot(ax=ax)
     fg.savefig(here / 'out' / f'gid_{gid}-tag_{tag}.pdf')
-t6 = pc()
+timing.toc('output/samples')
 
-N = rec.num_cells()
+if have_stats:
+    timing.tic('output/statistics')
+    N = rec.num_cells()
 
-cells = defaultdict(lambda: defaultdict(lambda: 0))
-spike = defaultdict(lambda: defaultdict(lambda: 0))
-conns = defaultdict(lambda: 0)
+    cells = defaultdict(lambda: defaultdict(lambda: 0))
+    spike = defaultdict(lambda: defaultdict(lambda: 0))
+    conns = defaultdict(lambda: 0)
 
-for gid in range(N):
-    meta = rec.gid_to_meta[gid]
-    pop = meta['population']
-    kind = meta['type_id']
-    cells[pop][kind] += 1
-    cells[pop][-1] += 1
-    for conn in rec.connections_on(gid):
-        src = rec.gid_to_meta[conn.source.gid]['population']
-        conns[(src, pop)] += 1
+    for gid in range(N):
+        meta = rec.gid_to_meta[gid]
+        pop = meta['population']
+        kind = meta['type_id']
+        cells[pop][kind] += 1
+        cells[pop][-1] += 1
+        for conn in rec.connections_on(gid):
+            src = rec.gid_to_meta[conn.source.gid]['population']
+            conns[(src, pop)] += 1
 
-for (gid, _), _ in spikes:
-    meta = rec.gid_to_meta[gid]
-    pop = meta['population']
-    kind = meta['type_id']
-    spike[pop][kind] += 1
-    spike[pop][-1] += 1
-C = sum(conns.values())
-t7 = pc()
+    for (gid, _), _ in spikes:
+        meta = rec.gid_to_meta[gid]
+        pop = meta['population']
+        kind = meta['type_id']
+        spike[pop][kind] += 1
+        spike[pop][-1] += 1
+    C = sum(conns.values())
+    timing.toc('output/statistics')
 
-print(f"""
+
+    print(f"""
 Statistics
 ==========
 
 * Cells                  {N:>13}""")
-for pop, kinds in cells.items():
-    print(f"  * {pop:<20} {kinds[-1]:>13}")
-    for kind, num in kinds.items():
-        if kind == -1:
-            continue
-        print(f"    * {kind:<18} {num:>13}")
-print(f"* Connections            {C:>13}")
-for (src, tgt), num in conns.items():
-    print(f"  * {src:<8} -> {tgt:<8} {num:>13}")
-print(f"* Spikes                 {len(spikes):>13}")
-for pop, kinds in spike.items():
-    print(f"  * {pop:<20} {kinds[-1]:>13}")
-    for kind, num in kinds.items():
-        if kind == -1:
-            continue
-        print(f"    * {kind:<18} {num:>13}")
-print(f"""* Runtime                {t6 - t0:>13.3f}s
-  * building             {t3 - t0:>13.3f}s
-    * recipe             {t1 - t0:>13.3f}s
-    * simulation         {t2 - t1:>13.3f}s
-      * reading data     {rec.io:>13.3f}s
-    * sampling           {t3 - t2:>13.3f}s
-  * run                  {t4 - t3:>13.3f}s
-  * output               {t6 - t4:>13.3f}s
-    * spikes             {t5 - t4:>13.3f}s
-    * samples            {t6 - t5:>13.3f}s
-  * statistics           {t7 - t6:>13.3f}s
-""")
+    for pop, kinds in cells.items():
+        print(f"  * {pop:<20} {kinds[-1]:>13}")
+        for kind, num in kinds.items():
+            if kind == -1:
+                continue
+            print(f"    * {kind:<18} {num:>13}")
+    print(f"* Connections            {C:>13}")
+    for (src, tgt), num in conns.items():
+        print(f"  * {src:<8} -> {tgt:<8} {num:>13}")
+    print(f"* Spikes                 {len(spikes):>13}")
+    for pop, kinds in spike.items():
+        print(f"  * {pop:<20} {kinds[-1]:>13}")
+        for kind, num in kinds.items():
+            if kind == -1:
+                continue
+            print(f"    * {kind:<18} {num:>13}")
+
+def show_times(root, childs, time, prefix):
+    lbl = f"{' '*prefix}* {root}"
+    print(f'{lbl:<37}{time[root]:0.3f}')
+    for child in childs[root]:
+        show_times(child, childs, time, prefix+2)
+
+if have_timing:
+    times = defaultdict(lambda: 0.0)
+    children = defaultdict(set)
+    for path, time in timing.timings.items():
+        last = 'Total'
+        times[last] += time
+        for k in path.split('/'):
+            children[last].add(k)
+            last = k
+            times[k] += time
+
+    print("""
+Timings
+==========
+    """)
+    show_times('Total', children, times, 0)
