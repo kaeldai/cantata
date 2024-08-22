@@ -7,7 +7,7 @@ readme = "Readme.org"
 license = "BSD-3-Clause"
 repository = "https://github.com/thorstenhater/cantata"
 description = "Convert SONATA package neuro science simulations into Arbor simulations."
-keywords = ["neuro science", "science", "simulation"]
+keywords = ["neuro-science", "science", "simulation"]
 categories = ["command-line-utilities"]
 
 [dependencies]
