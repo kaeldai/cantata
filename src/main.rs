@@ -1,5 +1,5 @@
 use clap::{self, Parser, Subcommand, ValueEnum};
-use sonata::{
+use cantata::{
     err::{Context, Result},
     fit::Fit,
     gen::Bundle,
