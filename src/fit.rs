@@ -184,7 +184,15 @@ impl Decor {
                 reg, ion, erev
             ));
         }
-        for (reg, MechanismData { name, parameters, globals }) in self.mechanisms.iter() {
+        for (
+            reg,
+            MechanismData {
+                name,
+                parameters,
+                globals,
+            },
+        ) in self.mechanisms.iter()
+        {
             let mut mech = name.to_string();
             let mut sep = '/';
             for (k, v) in globals {
@@ -302,7 +310,8 @@ impl Fit {
                         name: mech.clone(),
                         parameters: data.parameters.clone(),
                         globals: data.globals.clone(),
-                    }));
+                    },
+                ));
             }
         }
 

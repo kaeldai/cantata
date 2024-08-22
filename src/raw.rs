@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     err::{anyhow, Context, Result},
+    sup::{resolve_manifest, Components, Manifest},
     Map,
-    sup::{Manifest, Components, resolve_manifest},
 };
 
 use serde::{Deserialize, Serialize};
@@ -256,15 +256,22 @@ pub enum Input {
 impl Input {
     fn resolve_manifest(&mut self, manifest: &Manifest, base: &Path) -> Result<()> {
         match self {
-            Input::Spikes { input_file, .. } =>
-                input_file.iter_mut().try_for_each(|i| resolve_manifest(i, manifest, base)),
+            Input::Spikes { input_file, .. } => input_file
+                .iter_mut()
+                .try_for_each(|i| resolve_manifest(i, manifest, base)),
             Input::NWB { file, .. } => resolve_manifest(file, manifest, base),
-            Input::LFP { positions_file, mesh_files_dir, .. } => {
+            Input::LFP {
+                positions_file,
+                mesh_files_dir,
+                ..
+            } => {
                 resolve_manifest(positions_file, manifest, base)?;
                 resolve_manifest(mesh_files_dir, manifest, base)
             }
-            Input::CSV { file: Some(file), .. } => resolve_manifest(file, manifest, base),
-            _ => Ok(())
+            Input::CSV {
+                file: Some(file), ..
+            } => resolve_manifest(file, manifest, base),
+            _ => Ok(()),
         }
     }
 }
@@ -448,7 +455,8 @@ impl Simulation {
         raw.components
             .iter_mut()
             .try_for_each(|(_, it)| resolve_manifest(it, &raw.manifest, base_dir))?;
-        raw.components.insert("base_dir".into(), base_dir.to_str().unwrap().into());
+        raw.components
+            .insert("base_dir".into(), base_dir.to_str().unwrap().into());
 
         // Resolve the Network to an object
         let mut network = match raw.network {
@@ -490,8 +498,9 @@ impl Simulation {
             raw.node_sets
         };
 
-        raw.inputs.values_mut()
-                  .try_for_each(|i| i.resolve_manifest(&raw.manifest, base_dir))?;
+        raw.inputs
+            .values_mut()
+            .try_for_each(|i| i.resolve_manifest(&raw.manifest, base_dir))?;
 
         Ok(Simulation {
             run: raw.run,

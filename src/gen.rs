@@ -1,10 +1,10 @@
 use crate::{
     err::Result,
     fit::Attribute,
-    sim::{CVPolicy, IClamp, ModelType, Probe, Simulation, Node, GlobalProperties},
+    sim::{CVPolicy, GlobalProperties, IClamp, ModelType, Node, Probe, Simulation},
     Map,
 };
-use anyhow::{bail, anyhow};
+use anyhow::{anyhow, bail};
 use serde::Serialize;
 
 /// Resources to store in the output.
@@ -28,7 +28,6 @@ pub struct CellMetaData {
     pub population: String,
     /// cell type label
     pub type_id: u64,
-
 }
 
 impl CellMetaData {
@@ -42,7 +41,7 @@ impl CellMetaData {
         Self {
             population: node.pop.to_string(),
             kind,
-            type_id: node.node_type.type_id
+            type_id: node.node_type.type_id,
         }
     }
 }
@@ -106,7 +105,8 @@ fn fudge_synapse_dynamics(old: &str) -> String {
         rep.1
     } else {
         old
-    }.to_string()
+    }
+    .to_string()
 }
 
 impl Bundle {
@@ -145,13 +145,11 @@ impl Bundle {
                         ));
                         let mech = edge.mech.as_ref().ok_or(anyhow!("Edge has no mechanism"))?;
                         let mech = fudge_synapse_dynamics(mech);
-                        let loc = format!("(on-components {} (segment {}))", edge.target.1, edge.target.0);
-                        syn.push((
-                            loc,
-                            mech,
-                            edge.dynamics.clone(),
-                            ix,
-                        ));
+                        let loc = format!(
+                            "(on-components {} (segment {}))",
+                            edge.target.1, edge.target.0
+                        );
+                        syn.push((loc, mech, edge.dynamics.clone(), ix));
                     }
                     incoming_connections.insert(gid, inc);
                     synapses.insert(gid, syn);
@@ -213,7 +211,8 @@ impl Bundle {
                         t => bail!("Unknown model template <{t}> for gid {gid}"),
                     }
                 }
-                ModelType::Virtual { .. } => { // The fields are largely irrelevant here
+                ModelType::Virtual { .. } => {
+                    // The fields are largely irrelevant here
                     let data: &mut Vec<f64> = gid_to_vrt.entry(gid).or_default();
                     if let Some(group) = sim.virtual_spikes.get(&node.pop) {
                         if let Some(ts) = group.get(&node.node_id) {
@@ -229,13 +228,15 @@ impl Bundle {
                     match model_template.as_ref() {
                         "nrn:IntFire1" => {
                             // Taken from nrn/IntFire1.mod and adapted to Arbor.
-                            let mut params = Map::from([("cm".to_string(), 1.0),
-                                                        ("U_neutral".to_string(), 0.0),
-                                                        ("U_reset".to_string(), 0.0),
-                                                        ("U_th".to_string(), 1.0), // TODO IntFire1 do be weird.
-                                                        ("U_0".to_string(), 0.0),
-                                                        ("t_ref".to_string(), 5.0),
-                                                        ("tau".to_string(), 10.0),]);
+                            let mut params = Map::from([
+                                ("cm".to_string(), 1.0),
+                                ("U_neutral".to_string(), 0.0),
+                                ("U_reset".to_string(), 0.0),
+                                ("U_th".to_string(), 1.0), // TODO IntFire1 do be weird.
+                                ("U_0".to_string(), 0.0),
+                                ("t_ref".to_string(), 5.0),
+                                ("tau".to_string(), 10.0),
+                            ]);
                             for (k, v) in node.dynamics.iter() {
                                 match k.as_ref() {
                                     "tau" =>
@@ -312,16 +313,17 @@ impl Bundle {
             CVPolicy::MaxExtent(l) => Some(*l),
         };
 
-        let cable_cell_globals = if let Some(GlobalProperties { celsius, v_init }) = sim.global_properties {
-            Some(CableGlobalProperties { celsius, v_init })
-        } else {
-            None
-        };
+        let cable_cell_globals =
+            if let Some(GlobalProperties { celsius, v_init }) = sim.global_properties {
+                Some(CableGlobalProperties { celsius, v_init })
+            } else {
+                None
+            };
 
         // Sort all spike sources. Just to be sure...
-        gid_to_vrt.values_mut()
-                  .for_each(|ts| ts.sort_by(|a, b| a.partial_cmp(b)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)));
+        gid_to_vrt.values_mut().for_each(|ts| {
+            ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        });
 
         Ok(Bundle {
             time: sim.tfinal,

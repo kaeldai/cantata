@@ -1,7 +1,7 @@
 use crate::{err::Result, Map};
 use anyhow::bail;
-use std::str::FromStr;
 use std::path::Path;
+use std::str::FromStr;
 
 /// $key = value; used to resolve file paths
 pub type Manifest = Map<String, String>;

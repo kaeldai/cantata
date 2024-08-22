@@ -6,10 +6,9 @@ use crate::{
     Map,
 };
 use anyhow::{anyhow, bail};
+use hdf5_metno as hdf5;
 use serde::{Deserialize, Serialize};
 use std::{fs::File, str::FromStr};
-use hdf5_metno as hdf5;
-
 
 /// Model types currently known to SONATA
 ///
@@ -112,7 +111,7 @@ impl NodeType {
             ModelType::Biophysical { attributes, .. }
             | ModelType::Single { attributes, .. }
             | ModelType::Point { attributes, .. }
-            | ModelType::Virtual { attributes } => attributes
+            | ModelType::Virtual { attributes } => attributes,
         }
     }
 }
@@ -660,7 +659,11 @@ fn resolve_nodeset(
         raw::NodeSet::Compound(nss) => {
             let mut res = Vec::new();
             for ns in nss {
-                res.append(&mut resolve_nodeset(ns, node_populations, node_population_ids)?);
+                res.append(&mut resolve_nodeset(
+                    ns,
+                    node_populations,
+                    node_population_ids,
+                )?);
             }
             res
         }
@@ -668,11 +671,18 @@ fn resolve_nodeset(
     Ok(res)
 }
 
-fn read_virtual_spikes(components: &Components,
-                       inputs: &raw::Inputs) -> Result<Map<String, Map<u64, Vec<f64>>>> {
+fn read_virtual_spikes(
+    components: &Components,
+    inputs: &raw::Inputs,
+) -> Result<Map<String, Map<u64, Vec<f64>>>> {
     let mut res: Map<String, Map<u64, Vec<f64>>> = Map::new();
     for input in inputs.values() {
-        if let raw::Input::Spikes { module, input_file, node_set } = input {
+        if let raw::Input::Spikes {
+            module,
+            input_file,
+            node_set,
+        } = input
+        {
             if module != "sonata" {
                 bail!("Unknown module '{module}' for Input::Spikes");
             }
@@ -683,7 +693,7 @@ fn read_virtual_spikes(components: &Components,
                     let spikes = hdf5::file::File::open(&ifn)?
                         .group("spikes")?
                         .group(node_set_name)?;
-                    let nodes  = get_dataset::<u32>(&spikes, "node_ids")?;
+                    let nodes = get_dataset::<u32>(&spikes, "node_ids")?;
                     let times = get_dataset::<f64>(&spikes, "timestamps")?;
                     if times.len() != nodes.len() {
                         bail!("Virtual spike data for {node_set_name} has different lengths on timestamps and node_ids");
@@ -692,8 +702,7 @@ fn read_virtual_spikes(components: &Components,
                         data.entry(*id as u64).or_default().push(*ts);
                     }
                 }
-            }
-            else {
+            } else {
                 bail!("NodeSet on spikes must be a named reference, is {node_set:?}");
             }
         }
@@ -701,46 +710,50 @@ fn read_virtual_spikes(components: &Components,
     Ok(res)
 }
 
-fn read_iclamps(inputs: &Map<String, raw::Input>,
-                node_populations: &Vec<PopId>,
-                node_population_ids: &Map<String, usize>) -> Result<Map<u64, Vec<IClamp>>> {
+fn read_iclamps(
+    inputs: &Map<String, raw::Input>,
+    node_populations: &Vec<PopId>,
+    node_population_ids: &Map<String, usize>,
+) -> Result<Map<u64, Vec<IClamp>>> {
     let mut iclamps: Map<u64, Vec<IClamp>> = Map::new();
     let mut tag = 0;
     for input in inputs.values() {
-        if let
-            raw::Input::CurrentClamp {
-                amp,
-                delay,
-                duration,
-                node_set,
-                enabled,
-                ..
-            } = input {
-                if !enabled {
-                    continue;
-                }
-                assert!(amp.len() == delay.len());
-                assert!(amp.len() == duration.len());
+        if let raw::Input::CurrentClamp {
+            amp,
+            delay,
+            duration,
+            node_set,
+            enabled,
+            ..
+        } = input
+        {
+            if !enabled {
+                continue;
+            }
+            assert!(amp.len() == delay.len());
+            assert!(amp.len() == duration.len());
 
-                let gids = resolve_nodeset(
-                    node_set.as_ref().ok_or_else(|| anyhow!("No nodeset given."))?,
-                    node_populations,
-                    node_population_ids,
-                )?;
-                for gid in gids.into_iter() {
-                    for ix in 0..amp.len() {
-                        let ic = IClamp {
-                            amplitude_nA: amp[ix],
-                            delay_ms: delay[ix],
-                            duration_ms: duration[ix],
-                            tag,
-                            location: String::from("(location 0 0.5)"), // TODO Placeholder
-                        };
-                        iclamps.entry(gid).or_default().push(ic);
-                        tag += 1;
-                    }
+            let gids = resolve_nodeset(
+                node_set
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("No nodeset given."))?,
+                node_populations,
+                node_population_ids,
+            )?;
+            for gid in gids.into_iter() {
+                for ix in 0..amp.len() {
+                    let ic = IClamp {
+                        amplitude_nA: amp[ix],
+                        delay_ms: delay[ix],
+                        duration_ms: duration[ix],
+                        tag,
+                        location: String::from("(location 0 0.5)"), // TODO Placeholder
+                    };
+                    iclamps.entry(gid).or_default().push(ic);
+                    tag += 1;
                 }
             }
+        }
     }
     Ok(iclamps)
 }
@@ -790,12 +803,17 @@ impl Simulation {
         for (lid, node_list) in node_lists.iter_mut().enumerate() {
             for ty in node_list.types.iter_mut() {
                 match &ty.model_type {
-                    ModelType::Biophysical { attributes, .. } | ModelType::Single{ attributes, .. } | ModelType::Point{ attributes, .. } |
-                    ModelType::Virtual { attributes, .. } => {
+                    ModelType::Biophysical { attributes, .. }
+                    | ModelType::Single { attributes, .. }
+                    | ModelType::Point { attributes, .. }
+                    | ModelType::Virtual { attributes, .. } => {
                         if let Some(Attribute::String(name)) = attributes.get("dynamics_params") {
                             let fname = find_component(name, &sim.components)?;
                             let fdata = std::fs::File::open(fname)?;
-                            let fdata = serde_json::from_reader::<_, Map<String, serde_json::Value>>(&fdata)
+                            let fdata =
+                                serde_json::from_reader::<_, Map<String, serde_json::Value>>(
+                                    &fdata,
+                                )
                                 .with_context(|| format!("Parsing JSON from {name}"))?
                                 .into_iter()
                                 .filter_map(|(k, v)| v.as_f64().map(|v| (k.to_string(), v)));
@@ -833,7 +851,8 @@ impl Simulation {
                 let sections = sections.clone();
                 if variable_name == "v" {
                     Probe::CableVoltage(sections)
-                } else if variable_name.ends_with('i') { // TODO this is nasty, what if a STATE ends in i/o?!
+                } else if variable_name.ends_with('i') {
+                    // TODO this is nasty, what if a STATE ends in i/o?!
                     Probe::CableIntConc(variable_name.clone(), sections)
                 } else if variable_name.ends_with('o') {
                     Probe::CableExtConc(variable_name.clone(), sections)
@@ -850,8 +869,6 @@ impl Simulation {
             }
         }
 
-
-
         let cv_policy = if let Some(d) = sim.run.dl {
             CVPolicy::MaxExtent(d)
         } else {
@@ -861,11 +878,12 @@ impl Simulation {
         let virtual_spikes = read_virtual_spikes(&sim.components, &sim.inputs)?;
         let iclamps = read_iclamps(&sim.inputs, &node_populations, &node_population_ids)?;
 
-        let global_properties = if let raw::Conditions::Detailled { celsius, v_init } = sim.conditions {
-            Some(GlobalProperties { celsius, v_init })
-        } else {
-            None
-        };
+        let global_properties =
+            if let raw::Conditions::Detailled { celsius, v_init } = sim.conditions {
+                Some(GlobalProperties { celsius, v_init })
+            } else {
+                None
+            };
 
         Ok(Self {
             tfinal: sim.run.tstop,
@@ -889,181 +907,186 @@ impl Simulation {
     fn reify_edges(&self, target_population: &str, target_id: u64) -> Result<Vec<Edge>> {
         let mut incoming_edges = Vec::new();
         for edge_list in &self.edge_lists {
-            for edge_population in edge_list.populations.iter().filter(|p| p.target_pop == target_population) {
-                    for (edge_index, _) in edge_population
-                        .target_ids
+            for edge_population in edge_list
+                .populations
+                .iter()
+                .filter(|p| p.target_pop == target_population)
+            {
+                for (edge_index, _) in edge_population
+                    .target_ids
+                    .iter()
+                    .enumerate()
+                    .filter(|it| *it.1 == target_id)
+                {
+                    let edge_index_error = || {
+                        anyhow!(
+                            "Index {} overruns size {} of population {}",
+                            edge_index,
+                            edge_population.size,
+                            edge_population.name
+                        )
+                    };
+
+                    let type_id = *edge_population
+                        .type_ids
+                        .get(edge_index)
+                        .ok_or_else(edge_index_error)?;
+                    let src_id = edge_population
+                        .source_ids
+                        .get(edge_index)
+                        .ok_or_else(edge_index_error)?;
+                    let src_pop = &edge_population.source_pop;
+                    let src_idx = self
+                        .node_population_ids
+                        .get(src_pop)
+                        .ok_or_else(|| anyhow!("Unknown population <{src_pop}>"))?;
+                    let src_gid = *self
+                        .node_population_to_gid
+                        .get(&(*src_idx, *src_id))
+                        .unwrap();
+                    let edge_group_id = *edge_population
+                        .group_ids
+                        .get(edge_index)
+                        .ok_or_else(edge_index_error)?;
+                    let ty = edge_list
+                        .types
                         .iter()
-                        .enumerate()
-                        .filter(|it| *it.1 == target_id)
-                    {
-                        let edge_index_error = || {
+                        .find(|ty| ty.type_id == type_id)
+                        .ok_or_else(|| {
                             anyhow!(
-                                "Index {} overruns size {} of population {}",
-                                edge_index,
-                                edge_population.size,
+                                "Couldn't find edge type {type_id} in population {}",
                                 edge_population.name
                             )
-                        };
+                        })?;
+                    let edge_group = edge_population
+                        .groups
+                        .iter()
+                        .find(|g| g.id == edge_group_id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Couldn't find group id {edge_group_id} edge population {}",
+                                edge_population.name
+                            )
+                        })?;
+                    // index into group for this edge
+                    let group_index = *edge_population
+                        .group_indices
+                        .get(edge_index)
+                        .ok_or_else(edge_index_error)?;
 
-                        let type_id = *edge_population
-                            .type_ids
-                            .get(edge_index)
-                            .ok_or_else(edge_index_error)?;
-                        let src_id = edge_population
-                            .source_ids
-                            .get(edge_index)
-                            .ok_or_else(edge_index_error)?;
-                        let src_pop = &edge_population.source_pop;
-                        let src_idx = self
-                            .node_population_ids
-                            .get(src_pop)
-                            .ok_or_else(|| anyhow!("Unknown population <{src_pop}>"))?;
-                        let src_gid = *self
-                            .node_population_to_gid
-                            .get(&(*src_idx, *src_id))
-                            .unwrap();
-                        let edge_group_id = *edge_population
-                            .group_ids
-                            .get(edge_index)
-                            .ok_or_else(edge_index_error)?;
-                        let ty = edge_list
-                            .types
-                            .iter()
-                            .find(|ty| ty.type_id == type_id)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "Couldn't find edge type {type_id} in population {}",
-                                    edge_population.name
-                                )
-                            })?;
-                        let edge_group = edge_population
-                            .groups
-                            .iter()
-                            .find(|g| g.id == edge_group_id)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "Couldn't find group id {edge_group_id} edge population {}",
-                                    edge_population.name
-                                )
-                            })?;
-                        // index into group for this edge
-                        let group_index = *edge_population
-                            .group_indices
-                            .get(edge_index)
-                            .ok_or_else(edge_index_error)?;
+                    let delay = if let Some(ds) = edge_group.custom.get("delay") {
+                        ds[group_index]
+                    } else if let Some(Attribute::Float(d)) = ty.attributes.get("delay") {
+                        *d
+                    } else {
+                        bail!(
+                            "Edge {type_id} in population {} has no delay",
+                            edge_population.name
+                        )
+                    };
+                    let weight = if let Some(ds) = edge_group.custom.get("syn_weight") {
+                        ds[group_index]
+                    } else if let Some(Attribute::Float(d)) = ty.attributes.get("syn_weight") {
+                        *d
+                    } else {
+                        bail!(
+                            "Edge {type_id} in population {} has no weight",
+                            edge_population.name
+                        )
+                    };
 
-                        let delay = if let Some(ds) = edge_group.custom.get("delay") {
-                            ds[group_index]
-                        } else if let Some(Attribute::Float(d)) = ty.attributes.get("delay") {
-                            *d
+                    let mech = if let Some(s) = ty.attributes.get("model_template") {
+                        if let Attribute::String(s) = s {
+                            Some(s.to_string())
                         } else {
                             bail!(
-                                "Edge {type_id} in population {} has no delay",
+                                "Edge type {type_id} in population {} has non-string model",
                                 edge_population.name
-                            )
-                        };
-                        let weight = if let Some(ds) = edge_group.custom.get("syn_weight") {
-                            ds[group_index]
-                        } else if let Some(Attribute::Float(d)) = ty.attributes.get("syn_weight") {
-                            *d
-                        } else {
-                            bail!(
-                                "Edge {type_id} in population {} has no weight",
-                                edge_population.name
-                            )
-                        };
-
-                        let mech = if let Some(s) = ty.attributes.get("model_template") {
-                            if let Attribute::String(s) = s {
-                                Some(s.to_string())
-                            } else {
-                                bail!(
-                                    "Edge type {type_id} in population {} has non-string model",
-                                    edge_population.name
-                                );
-                            }
-                        } else {
-                            None
-                        };
-
-                        let tgt_pos = if let Some(ds) = edge_group.custom.get("afferent_swc_pos") {
-                            ds[group_index]
-                        } else if let Some(s) = ty.attributes.get("afferent_swc_pos") {
-                            if let Attribute::Float(s) = s {
-                                *s
-                            } else {
-                                bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
-                            }
-                        } else {
-                            0.5 // default to centering
-                        };
-
-                        let tgt_id = if let Some(ds) = edge_group.custom.get("afferent_swc_id") {
-                            ds[group_index]
-                        } else if let Some(s) = ty.attributes.get("afferent_swc_id") {
-                            if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
-                                *s
-                            } else {
-                                bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
-                            }
-                        } else {
-                            0.0 // default to first (=soma?)
-                        } as u64;
-
-                        let src_pos = if let Some(ds) = edge_group.custom.get("efferent_swc_pos") {
-                            ds[group_index]
-                        } else if let Some(s) = ty.attributes.get("efferent_swc_pos") {
-                            if let Attribute::Float(s) = s {
-                                *s
-                            } else {
-                                bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
-                            }
-                        } else {
-                            0.5 // default to centering
-                        };
-
-                        let src_id = if let Some(_) = edge_group.custom.get("efferent_swc_id") {
-                            bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
-                            // ds[group_index]
-                        } else if let Some(_) = ty.attributes.get("efferent_swc_id") {
-                            bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
-                            // if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
-                                // *s
-                            // } else {
-                                // bail!(
-                                    // "Edge type {type_id} in population {} has non-numeric segment position",
-                                    // edge_population.name
-                                // );
-                            // }
-                        } else {
-                            0.0 // default to first (=soma?)
-                        } as u64;
-
-                        // Construct dynamics parameters by merging the type level defaults with the group level overrides.
-                        let mut dynamics = ty.dynamics.clone();
-                        for (k, vs) in &edge_group.dynamics {
-                            let v = vs[group_index];
-                            dynamics.insert(k.to_string(), v);
+                            );
                         }
+                    } else {
+                        None
+                    };
 
-                        incoming_edges.push(Edge {
-                            src_gid,
-                            source: (src_id, src_pos),
-                            target: (tgt_id, tgt_pos),
-                            mech,
-                            delay,
-                            weight,
-                            dynamics,
-                        });
+                    let tgt_pos = if let Some(ds) = edge_group.custom.get("afferent_swc_pos") {
+                        ds[group_index]
+                    } else if let Some(s) = ty.attributes.get("afferent_swc_pos") {
+                        if let Attribute::Float(s) = s {
+                            *s
+                        } else {
+                            bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                        }
+                    } else {
+                        0.5 // default to centering
+                    };
+
+                    let tgt_id = if let Some(ds) = edge_group.custom.get("afferent_swc_id") {
+                        ds[group_index]
+                    } else if let Some(s) = ty.attributes.get("afferent_swc_id") {
+                        if let Attribute::Float(s) = s {
+                            // TODO _is_ that a float or a string or neither/
+                            *s
+                        } else {
+                            bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                        }
+                    } else {
+                        0.0 // default to first (=soma?)
+                    } as u64;
+
+                    let src_pos = if let Some(ds) = edge_group.custom.get("efferent_swc_pos") {
+                        ds[group_index]
+                    } else if let Some(s) = ty.attributes.get("efferent_swc_pos") {
+                        if let Attribute::Float(s) = s {
+                            *s
+                        } else {
+                            bail!(
+                                    "Edge type {type_id} in population {} has non-numeric segment position",
+                                    edge_population.name
+                                );
+                        }
+                    } else {
+                        0.5 // default to centering
+                    };
+
+                    let src_id = if let Some(_) = edge_group.custom.get("efferent_swc_id") {
+                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                        // ds[group_index]
+                    } else if let Some(_) = ty.attributes.get("efferent_swc_id") {
+                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                        // if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
+                        // *s
+                        // } else {
+                        // bail!(
+                        // "Edge type {type_id} in population {} has non-numeric segment position",
+                        // edge_population.name
+                        // );
+                        // }
+                    } else {
+                        0.0 // default to first (=soma?)
+                    } as u64;
+
+                    // Construct dynamics parameters by merging the type level defaults with the group level overrides.
+                    let mut dynamics = ty.dynamics.clone();
+                    for (k, vs) in &edge_group.dynamics {
+                        let v = vs[group_index];
+                        dynamics.insert(k.to_string(), v);
+                    }
+
+                    incoming_edges.push(Edge {
+                        src_gid,
+                        source: (src_id, src_pos),
+                        target: (tgt_id, tgt_pos),
+                        mech,
+                        delay,
+                        weight,
+                        dynamics,
+                    });
                 }
             }
         }
@@ -1135,7 +1158,7 @@ impl Simulation {
             }
         }
         for (k, vs) in group.custom.iter() {
-                custom.insert(k.to_string(), vs[group_index]);
+            custom.insert(k.to_string(), vs[group_index]);
         }
 
         let incoming_edges = self.reify_edges(&node_population.name, *node_id)?;

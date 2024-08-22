@@ -1,4 +1,7 @@
+use ciborium;
 use clap::{self, Parser, Subcommand, ValueEnum};
+use serde_json;
+use serde_pickle;
 use sonata::{
     err::{Context, Result},
     fit::Fit,
@@ -7,9 +10,6 @@ use sonata::{
     sim::Simulation,
     sup::find_component,
 };
-use ciborium;
-use serde_pickle;
-use serde_json;
 use std::str::FromStr;
 
 #[derive(Parser)]
@@ -22,7 +22,9 @@ struct Cli {
 
 #[derive(Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, ValueEnum)]
 enum Format {
-    CBOR, JSON, Pickle,
+    CBOR,
+    JSON,
+    Pickle,
 }
 
 #[derive(Subcommand)]
@@ -41,7 +43,8 @@ fn main() -> Result<()> {
         Cmd::Build { from, to, formats } => {
             let raw = raw::Simulation::from_file(&from)
                 .with_context(|| format!("Parsing simulation {from}"))?;
-            let sim = Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
+            let sim =
+                Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
             let mut out = Bundle::new(&sim).with_context(|| "Generating Python code")?;
 
             // Create all required directories
