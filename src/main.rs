@@ -1,7 +1,4 @@
-use ciborium;
 use clap::{self, Parser, Subcommand, ValueEnum};
-use serde_json;
-use serde_pickle;
 use sonata::{
     err::{Context, Result},
     fit::Fit,
@@ -69,7 +66,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
             for fit in out.decoration.iter_mut() {
-                to.push(&fit);
+                to.push(fit);
                 to.set_extension("acc");
                 let src = find_component(fit, &raw.components)
                     .with_context(|| format!("Searching raw fit {fit:?}"))?;
