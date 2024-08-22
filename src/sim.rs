@@ -8,6 +8,8 @@ use crate::{
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{fs::File, str::FromStr};
+use hdf5_metno as hdf5;
+
 
 /// Model types currently known to SONATA
 ///

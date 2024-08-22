@@ -12,7 +12,7 @@ clap         = { version = "4.0", features = ["derive"] }
 thiserror    = { version = "1.0" }
 anyhow       = { version = "1.0" }
 csv          = { version = "1.0" }
-hdf5         = { git = "https://github.com/aldanor/hdf5-rust.git" }
+hdf5-metno   = { version = "0.9" }
 ciborium     = { version = "0.2" }
 serde-pickle = { version = "1.1" }
 
