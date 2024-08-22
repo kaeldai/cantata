@@ -9,10 +9,14 @@ use serde::Serialize;
 
 /// Resources to store in the output.
 
-type ConnectionData = (usize, String, String, f64, f64);
-type ProbeData = (Option<String>, String, String);
-type SynapseData = (String, String, Map<String, f64>, String);
-type IClampData = (String, f64, f64, f64, String);
+/// (src_gid, src_tag, tgt_tag, weight, delay)
+type ConnectionData = (usize, usize, usize, f64, f64);
+/// (location, variable, tag)
+type ProbeData = (Option<String>, String, usize);
+/// (location, mech, params, tag)
+type SynapseData = (String, String, Map<String, f64>, usize);
+/// (location, delay, duration, current, tag)
+type IClampData = (String, f64, f64, f64, usize);
 
 /// Metadata about cell,
 /// mostly info discarded during generation
@@ -132,11 +136,10 @@ impl Bundle {
                     let mut inc = Vec::new();
                     let mut syn = Vec::new();
                     for (ix, edge) in node.incoming_edges.iter().enumerate() {
-                        let tgt = format!("syn_{ix}");
                         inc.push((
                             edge.src_gid as usize,
-                            String::from("src"), // in our SONATA model, there is _one_ source on each cell.
-                            tgt.clone(),
+                            0, // in our SONATA model, there is _one_ source on each cell.
+                            ix,
                             edge.weight,
                             edge.delay,
                         ));
@@ -147,7 +150,7 @@ impl Bundle {
                             loc,
                             mech,
                             edge.dynamics.clone(),
-                            tgt,
+                            ix,
                         ));
                     }
                     incoming_connections.insert(gid, inc);
@@ -159,8 +162,8 @@ impl Bundle {
                         .map(|e| {
                             (
                                 e.src_gid as usize,
-                                String::from("src"), // in our SONATA model, there is _one_ source on each cell.
-                                String::from("tgt"),
+                                0, // in our SONATA model, there is _one_ source on each cell.
+                                0,
                                 e.weight,
                                 e.delay,
                             )
@@ -266,7 +269,7 @@ impl Bundle {
                     *delay_ms,
                     *duration_ms,
                     *amplitude_nA,
-                    tag.clone(),
+                    *tag,
                 ));
             }
             current_clamps.insert(*gid as usize, stim);
@@ -274,29 +277,29 @@ impl Bundle {
 
         for (gid, sim_probes) in &sim.reports {
             let mut prbs = Vec::new();
-            for probe in sim_probes {
+            for (ix, probe) in sim_probes.iter().enumerate() {
                 match probe {
                     Probe::CableVoltage(ls) => {
                         for l in ls {
-                            prbs.push((Some(l.clone()), "voltage".into(), format!("prb-voltage@{l}")));
+                            prbs.push((Some(l.clone()), "voltage".into(), ix));
                         }
                     }
                     Probe::Lif => {
-                        prbs.push((None, "voltage".into(), "prb-voltage".into()));
+                        prbs.push((None, "voltage".into(), ix));
                     }
                     Probe::CableIntConc(ion, ls) => {
                         for l in ls {
-                            prbs.push((Some(l.clone()), ion.clone(), format!("prb-{ion}@{l}")));
+                            prbs.push((Some(l.clone()), ion.clone(), ix));
                         }
                     }
                     Probe::CableState(var, ls) => {
                         for l in ls {
-                            prbs.push((Some(l.clone()), var.clone(), format!("prb-{var}@{l}")));
+                            prbs.push((Some(l.clone()), var.clone(), ix));
                         }
                     }
                     Probe::CableExtConc(ion, ls) => {
                         for l in ls {
-                            prbs.push((Some(l.clone()), ion.clone(), format!("prb-{ion}@{l}")));
+                            prbs.push((Some(l.clone()), ion.clone(), ix));
                         }
                     }
                 }

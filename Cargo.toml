@@ -6,14 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0" }
-clap       = { version = "4.0", features = ["derive"] }
-thiserror  = { version = "1.0" }
-anyhow     = { version = "1.0" }
-csv        = { version = "1.0" }
-hdf5       = { git = "https://github.com/aldanor/hdf5-rust.git" }
-
+serde        = { version = "1.0", features = ["derive"] }
+serde_json   = { version = "1.0" }
+clap         = { version = "4.0", features = ["derive"] }
+thiserror    = { version = "1.0" }
+anyhow       = { version = "1.0" }
+csv          = { version = "1.0" }
+hdf5         = { git = "https://github.com/aldanor/hdf5-rust.git" }
+ciborium     = { version = "0.2" }
+serde-pickle = { version = "1.1" }
 
 [[bin]]
 name = "sonata"

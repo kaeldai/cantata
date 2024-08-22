@@ -636,7 +636,7 @@ pub struct IClamp {
     pub amplitude_nA: f64,
     pub delay_ms: f64,
     pub duration_ms: f64,
-    pub tag: String,
+    pub tag: usize,
     pub location: String,
 }
 
@@ -703,7 +703,8 @@ fn read_iclamps(inputs: &Map<String, raw::Input>,
                 node_populations: &Vec<PopId>,
                 node_population_ids: &Map<String, usize>) -> Result<Map<u64, Vec<IClamp>>> {
     let mut iclamps: Map<u64, Vec<IClamp>> = Map::new();
-    for (tag, input) in inputs {
+    let mut tag = 0;
+    for input in inputs.values() {
         if let
             raw::Input::CurrentClamp {
                 amp,
@@ -730,11 +731,11 @@ fn read_iclamps(inputs: &Map<String, raw::Input>,
                             amplitude_nA: amp[ix],
                             delay_ms: delay[ix],
                             duration_ms: duration[ix],
-                            tag: tag.clone(),
+                            tag,
                             location: String::from("(location 0 0.5)"), // TODO Placeholder
                         };
-
-                        iclamps.entry(gid).or_default().push(ic)
+                        iclamps.entry(gid).or_default().push(ic);
+                        tag += 1;
                     }
                 }
             }

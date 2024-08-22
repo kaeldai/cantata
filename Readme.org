@@ -2,15 +2,22 @@
 
 * Introduction
 
-Translate SONATA simulations to something Arbor can execute.
-Requires a working installation of Rust (incl Cargo), Python, and Arbor (dev).
-Checkout this repository, then
+Translate SONATA simulations to something Arbor can execute. Requires a working
+installation of Rust (incl Cargo), Python, and Arbor (v0.10.0).
 
+Setup
 #+begin_src shell
-$ cd cantata
-$ cargo run -- build path/to/sonata/simulation.json out-dir
-$ cd out-dir
-$ python3 main.py
+> rustup update
+> pip install numpy cbor2 pandas matplotlib arbor
+> git clone https://github.com/thorstenhater/cantata.git
+#+end_src
+
+Run a test
+#+begin_src shell
+> cd cantata
+> cargo run -- build path/to/sonata/simulation.json out-dir
+> cd out-dir
+> python3 main.py
 #+end_src
 
 This will perform the translation and create a working (hopefully, this is an

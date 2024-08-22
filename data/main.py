@@ -4,16 +4,16 @@ from collections import defaultdict
 import arbor as A
 from arbor import units as U
 import pandas as pd
-from json import load as load_data
 import matplotlib.pyplot as plt
 from time import perf_counter as pc
 import re
 from pathlib import Path
+from cbor2 import load as load_data
 
 here = Path(__file__).parent
 
-have_timing = True
-have_stats = True
+have_timing = False
+have_stats = False
 
 # check arbor version
 ver = re.match(r"(\d+)\.(\d+)\.(\d+)(-\w+)?", A.__version__)
@@ -52,36 +52,64 @@ def load_morphology(path):
         raise RuntimeError(f"Unknown morphology file type {sfx}")
 
 
+class Timing:
+    def __init__(self):
+        self.timings = defaultdict(lambda: 0.0)
+        self.times = defaultdict(lambda: 0.0)
+        self.children = defaultdict(set)
+
+    def tic(self, key):
+        self.timings[key] -= pc()
+
+    def toc(self, key):
+        self.timings[key] += pc()
+
+    def show_times(self, root, prefix):
+        lbl = f"{' '*prefix}* {root}"
+        print(f"{lbl:<37}{self.times[root]:0.3f}")
+        for child in self.children[root]:
+            self.show_times(child, prefix + 2)
+
+
+    def report(self):
+        for path, time in self.timings.items():
+            last = "Total"
+            self.times[last] += time
+            for k in path.split("/"):
+                self.children[last].add(k)
+                last = k
+                self.times[k] += time
+        print(
+        """
+Timings
+==========
+    """
+    )
+        self.show_times("Total", 0)
+
+
+class TimingNull:
+    def __init__(self):
+        pass
+
+    def tic(self, _):
+        pass
+
+    def toc(self, _):
+        pass
+
+    def report(self):
+        pass
+
+
 if have_timing:
-
-    class Timing:
-        def __init__(self):
-            self.timings = defaultdict(lambda: 0.0)
-
-        def tic(self, key):
-            self.timings[key] -= pc()
-
-        def toc(self, key):
-            self.timings[key] += pc()
-
+    timing = Timing()
 else:
-
-    class Timing:
-        def __init__(self):
-            pass
-
-        def tic(self, _):
-            pass
-
-        def toc(self, _):
-            pass
-
-
-timing = Timing()
+    timing = TimingNull()
 
 
 def open_sim():
-    with open(here / "dat/sim.json", "rb") as fd:
+    with open(here / "dat/sim.cbor", "rb") as fd:
         return load_data(fd)
 
 
@@ -90,7 +118,9 @@ def close_sim(raw):
 
 
 def read_int_dict(raw, key):
-    return {int(k): v for k, v in raw[key].items()}
+    res = raw[key]
+    assert isinstance(res, dict)
+    return res
 
 
 def read_dict(raw, key):
@@ -190,7 +220,7 @@ class recipe(A.recipe):
         if not gid in self.gid_to_inc:
             return []
         return [
-            A.connection((src, lbl), tgt, w, max(d, self.dt) * U.ms)
+            A.connection((src, f"src-{lbl}"), f"syn-{tgt}", w, max(d, self.dt) * U.ms)
             for src, lbl, tgt, w, d in self.gid_to_inc[gid]
         ]
 
@@ -215,6 +245,7 @@ class recipe(A.recipe):
         if gid in self.gid_to_prb:
             kind = self.cell_kind(gid)
             for loc, var, tag in self.gid_to_prb[gid]:
+                tag = f"probe-{tag}"
                 if kind == A.cell_kind.cable:
                     loc = f'(on-components 0.5 (region "{loc}"))'
                     if var == "voltage":
@@ -243,11 +274,11 @@ class recipe(A.recipe):
         lbl = A.label_dict().add_swc_tags()
         # NOTE in theory we could have more and in other places...
         dec.place(
-            "(location 0 0.5)", A.threshold_detector(self.threshold * U.mV), "src"
+            "(location 0 0.5)", A.threshold_detector(self.threshold * U.mV), "src-0"
         )
         if gid in self.gid_to_syn:
             for location, synapse, params, tag in self.gid_to_syn[gid]:
-                dec.place(location, A.synapse(synapse, **params), tag)
+                dec.place(location, A.synapse(synapse, **params), f"syn-{tag}")
         if gid in self.gid_to_icp:
             for loc, delay, duration, amplitude, tag in self.gid_to_icp[gid]:
                 dec.place(
@@ -257,14 +288,14 @@ class recipe(A.recipe):
                         duration=duration * U.ms,
                         current=amplitude * U.nA,
                     ),
-                    tag,
+                    f"ic-{tag}",
                 )
         dec.discretization(self.cv_policy)
 
         return A.cable_cell(mrf, dec, lbl)
 
     def make_lif_cell(self, gid):
-        cell = A.lif_cell("src", "tgt")
+        cell = A.lif_cell("src-0", "syn-0")
         data = self.gid_to_lif[gid]
         # setup the cell to adhere to NEURON's defaults
         cell.C_m = 0.6 * data["cm"] * U.pF
@@ -278,7 +309,7 @@ class recipe(A.recipe):
 
     def make_vrt_cell(self, gid):
         return A.spike_source_cell(
-            "src", A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]])
+            "src-0", A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]])
         )
 
     def load_cable_data(self, gid):
@@ -415,28 +446,4 @@ Statistics
             print(f"    * {kind:<18} {num:>13}")
 
 
-def show_times(root, childs, time, prefix):
-    lbl = f"{' '*prefix}* {root}"
-    print(f"{lbl:<37}{time[root]:0.3f}")
-    for child in childs[root]:
-        show_times(child, childs, time, prefix + 2)
-
-
-if have_timing:
-    times = defaultdict(lambda: 0.0)
-    children = defaultdict(set)
-    for path, time in timing.timings.items():
-        last = "Total"
-        times[last] += time
-        for k in path.split("/"):
-            children[last].add(k)
-            last = k
-            times[k] += time
-
-    print(
-        """
-Timings
-==========
-    """
-    )
-    show_times("Total", children, times, 0)
+timing.report()

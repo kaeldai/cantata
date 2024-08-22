@@ -1,4 +1,4 @@
-use clap::{self, Parser, Subcommand};
+use clap::{self, Parser, Subcommand, ValueEnum};
 use sonata::{
     err::{Context, Result},
     fit::Fit,
@@ -7,7 +7,9 @@ use sonata::{
     sim::Simulation,
     sup::find_component,
 };
-
+use ciborium;
+use serde_pickle;
+use serde_json;
 use std::str::FromStr;
 
 #[derive(Parser)]
@@ -18,15 +20,25 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, ValueEnum)]
+enum Format {
+    CBOR, JSON, Pickle,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    Build { from: String, to: String },
+    Build {
+        from: String,
+        to: String,
+        #[arg(short, long)]
+        formats: Vec<Format>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { from, to } => {
+        Cmd::Build { from, to, formats } => {
             let raw = raw::Simulation::from_file(&from)
                 .with_context(|| format!("Parsing simulation {from}"))?;
             let sim = Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
@@ -72,10 +84,25 @@ fn main() -> Result<()> {
 
             to.push("dat");
             std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-            to.push("sim.json");
-            let writer = std::fs::File::create(&to)?;
-            serde_json::to_writer_pretty(writer, &out)?;
-            to.pop();
+            if formats.contains(&Format::JSON) {
+                to.push("sim.json");
+                let writer = std::fs::File::create(&to)?;
+                serde_json::to_writer_pretty(writer, &out)?;
+                to.pop();
+            }
+            if formats.is_empty() || formats.contains(&Format::CBOR) {
+                to.push("sim.cbor");
+                let writer = std::fs::File::create(&to)?;
+                ciborium::into_writer(&out, writer)?;
+                to.pop();
+            }
+            if formats.contains(&Format::Pickle) {
+                to.push("sim.pcl");
+                let mut writer = std::fs::File::create(&to)?;
+                serde_pickle::to_writer(&mut writer, &out, Default::default())?;
+                to.pop();
+            }
+
             to.pop();
 
             to.push("out");
