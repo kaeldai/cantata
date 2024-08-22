@@ -1,5 +1,5 @@
 [package]
-name = "sonata"
+name = "cantata"
 version = "0.1.0"
 edition = "2021"
 authors = ["T. Hater"]
@@ -21,5 +21,5 @@ ciborium     = { version = "0.2" }
 serde-pickle = { version = "1.1" }
 
 [[bin]]
-name = "sonata"
+name = "cantata"
 path = "src/main.rs"
