@@ -2,8 +2,12 @@
 name = "sonata"
 version = "0.1.0"
 edition = "2021"
+authors = ["T. Hater"]
+readme = "Readme.org"
+license = "BSD-3"
+repository = "https://github.com/thorstenhater/cantata"
+description = "Convert SONATA package neuro science simulations into Arbor simulations."
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 serde        = { version = "1.0", features = ["derive"] }
