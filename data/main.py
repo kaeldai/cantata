@@ -9,6 +9,7 @@ from time import perf_counter as pc
 import re
 from pathlib import Path
 from cbor2 import load as load_data
+from math import ceil
 
 here = Path(__file__).parent
 
@@ -70,7 +71,6 @@ class Timing:
         for child in self.children[root]:
             self.show_times(child, prefix + 2)
 
-
     def report(self):
         for path, time in self.timings.items():
             last = "Total"
@@ -80,11 +80,11 @@ class Timing:
                 last = k
                 self.times[k] += time
         print(
-        """
+            """
 Timings
 ==========
     """
-    )
+        )
         self.show_times("Total", 0)
 
 
@@ -336,7 +336,7 @@ for kind, tag in zip(
 ):
     if tag in rec.kind_to_count:
         hints[kind] = A.partition_hint(
-            cpu_group_size=rec.kind_to_count[tag] / ctx.threads
+            cpu_group_size=int(ceil(rec.kind_to_count[tag] / ctx.threads))
         )
 ddc = A.partition_load_balance(rec, ctx, hints)
 sim = A.simulation(rec, context=ctx, domains=ddc)
@@ -347,7 +347,7 @@ sim.record(A.spike_recording.all)
 
 schedule = A.regular_schedule(tstart=0 * U.ms, dt=10 * rec.dt * U.ms)
 handles = {
-    (gid, tag): sim.sample((gid, tag), schedule=schedule)
+    (gid, tag): sim.sample((gid, f"probe-{tag}"), schedule=schedule)
     for gid, prbs in rec.gid_to_prb.items()
     for _, _, tag in prbs
 }

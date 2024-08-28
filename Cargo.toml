@@ -1,6 +1,6 @@
 [package]
 name = "cantata"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["T. Hater"]
 readme = "Readme.org"
@@ -20,6 +20,7 @@ csv          = { version = "1.0" }
 hdf5-metno   = { version = "0.9" }
 ciborium     = { version = "0.2" }
 serde-pickle = { version = "1.1" }
+nml2         = { version = "^0.3.1"}
 
 [[bin]]
 name = "cantata"

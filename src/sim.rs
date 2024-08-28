@@ -614,6 +614,8 @@ pub struct Simulation {
     pub virtual_spikes: Map<String, Map<u64, Vec<f64>>>,
     /// cable cell global properties
     pub global_properties: Option<GlobalProperties>,
+    /// components for delayed/lazy lookup
+    pub components: Components,
 }
 
 #[derive(Debug, Clone)]
@@ -786,6 +788,7 @@ impl Simulation {
             cv_policy,
             virtual_spikes,
             global_properties,
+            components: sim.components.clone(),
             size: start,
             spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
         };

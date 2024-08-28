@@ -5,6 +5,7 @@ use cantata::{
     raw,
     sim::Simulation,
     sup::find_component,
+    nml,
 };
 use clap::{self, Parser, Subcommand, ValueEnum};
 use std::str::FromStr;
@@ -71,13 +72,25 @@ fn main() -> Result<()> {
                 to.set_extension("acc");
                 let src = find_component(fit, &raw.components)
                     .with_context(|| format!("Searching raw fit {fit:?}"))?;
-                let inp = Fit::from_file(&src)
-                    .with_context(|| format!("Extracting fit {src:?}"))?
-                    .decor()
-                    .with_context(|| format!("Building decor for fit {src:?}"))?
-                    .to_acc()
-                    .with_context(|| format!("Converting fit {src:?} to acc"))?;
-                std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
+                match src.extension().and_then(|s| s.to_str()) {
+                    Some("json") => {
+                        let inp = Fit::from_file(&src)
+                            .with_context(|| format!("Extracting fit {src:?}"))?
+                            .decor()
+                            .with_context(|| format!("Building decor for fit {src:?}"))?
+                            .to_acc()
+                            .with_context(|| format!("Converting fit {src:?} to acc"))?;
+                        std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
+                    }
+                    Some("nml") => {
+                        let data = find_component(fit, &sim.components)
+                            .with_context(|| format!("Searching raw fit {fit:?}"))?;
+                        std::fs::write(&to, nml::mk_acc(&data)?)
+                            .with_context(|| format!("Writing {to:?}"))?;
+                    }
+                    Some(e) => anyhow::bail!("Unknown fit type {e}"),
+                    None => anyhow::bail!("Unspecified fit type."),
+                }
                 to.pop();
                 *fit = format!("{}.acc", fit.rsplit_once('.').expect(".json?").0);
             }

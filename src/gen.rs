@@ -208,6 +208,29 @@ impl Bundle {
                             };
                             cell_bio_ids.insert(gid, (mid, cid));
                         }
+                        acc if acc.starts_with("nml:") => {
+                            let mid = if let Some(Attribute::String(mrf)) =
+                                attributes.get("morphology")
+                            {
+                                if !mrf_to_mid.contains_key(mrf) {
+                                    let mid = morphology.len();
+                                    morphology.push(mrf.to_string());
+                                    mrf_to_mid.insert(mrf.to_string(), mid);
+                                }
+                                mrf_to_mid[mrf]
+                            } else {
+                                bail!("GID {gid} is a biophysical cell, but has no morphology.");
+                            };
+
+                            let acc = acc.strip_prefix("nml:").unwrap();
+                            if !acc_to_cid.contains_key(acc) {
+                                let cid = decoration.len();
+                                decoration.push(acc.to_string());
+                                acc_to_cid.insert(acc.to_string(), cid);
+                            };
+                            let cid = acc_to_cid[acc];
+                            cell_bio_ids.insert(gid, (mid, cid));
+                        }
                         t => bail!("Unknown model template <{t}> for gid {gid}"),
                     }
                 }
