@@ -2,10 +2,9 @@ use cantata::{
     err::{Context, Result},
     fit::Fit,
     gen::Bundle,
-    raw,
+    nml, raw,
     sim::Simulation,
     sup::find_component,
-    nml,
 };
 use clap::{self, Parser, Subcommand, ValueEnum};
 use std::str::FromStr;
