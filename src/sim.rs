@@ -641,36 +641,6 @@ pub struct IClamp {
     pub location: String,
 }
 
-fn resolve_nodeset(
-    cells: &raw::NodeSet,
-    node_populations: &Vec<PopId>,
-    node_population_ids: &Map<String, usize>,
-) -> Result<Vec<u64>> {
-    let res = match cells {
-        raw::NodeSet::Name(nm) => {
-            let pid = node_population_ids
-                .get(nm)
-                .ok_or(anyhow!("Unkown population <{nm}>"))?;
-            let PopId { start, size, .. } = node_populations[*pid];
-            (start..start + size).map(|i| i as u64).collect()
-        }
-        raw::NodeSet::Basic { .. } => todo!(),
-        raw::NodeSet::Ids(vs) => vs.clone(),
-        raw::NodeSet::Compound(nss) => {
-            let mut res = Vec::new();
-            for ns in nss {
-                res.append(&mut resolve_nodeset(
-                    ns,
-                    node_populations,
-                    node_population_ids,
-                )?);
-            }
-            res
-        }
-    };
-    Ok(res)
-}
-
 fn read_virtual_spikes(
     components: &Components,
     inputs: &raw::Inputs,
@@ -708,54 +678,6 @@ fn read_virtual_spikes(
         }
     }
     Ok(res)
-}
-
-fn read_iclamps(
-    inputs: &Map<String, raw::Input>,
-    node_populations: &Vec<PopId>,
-    node_population_ids: &Map<String, usize>,
-) -> Result<Map<u64, Vec<IClamp>>> {
-    let mut iclamps: Map<u64, Vec<IClamp>> = Map::new();
-    let mut tag = 0;
-    for input in inputs.values() {
-        if let raw::Input::CurrentClamp {
-            amp,
-            delay,
-            duration,
-            node_set,
-            enabled,
-            ..
-        } = input
-        {
-            if !enabled {
-                continue;
-            }
-            assert!(amp.len() == delay.len());
-            assert!(amp.len() == duration.len());
-
-            let gids = resolve_nodeset(
-                node_set
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("No nodeset given."))?,
-                node_populations,
-                node_population_ids,
-            )?;
-            for gid in gids.into_iter() {
-                for ix in 0..amp.len() {
-                    let ic = IClamp {
-                        amplitude_nA: amp[ix],
-                        delay_ms: delay[ix],
-                        duration_ms: duration[ix],
-                        tag,
-                        location: String::from("(location 0 0.5)"), // TODO Placeholder
-                    };
-                    iclamps.entry(gid).or_default().push(ic);
-                    tag += 1;
-                }
-            }
-        }
-    }
-    Ok(iclamps)
 }
 
 impl Simulation {
@@ -834,27 +756,68 @@ impl Simulation {
                 start += population.size;
             }
         }
-        let mut reports: Map<u64, Vec<Probe>> = Map::new();
+
+        let cv_policy = if let Some(d) = sim.run.dl {
+            CVPolicy::MaxExtent(d)
+        } else {
+            CVPolicy::Default
+        };
+
+        let virtual_spikes = read_virtual_spikes(&sim.components, &sim.inputs)?;
+
+        let global_properties =
+            if let raw::Conditions::Detailled { celsius, v_init } = sim.conditions {
+                Some(GlobalProperties { celsius, v_init })
+            } else {
+                None
+            };
+
+        let mut res = Self {
+            tfinal: sim.run.tstop,
+            dt: sim.run.dt,
+            node_lists,
+            edge_lists,
+            gid_to_node_population,
+            node_population_to_gid,
+            node_populations,
+            node_population_ids,
+            reports: Default::default(),
+            iclamps: Default::default(),
+            cv_policy,
+            virtual_spikes,
+            global_properties,
+            size: start,
+            spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
+        };
+
+        res.read_reports(&sim.reports)?;
+        res.read_iclamps(&sim.inputs)?;
+
+        Ok(res)
+    }
+
+    fn read_reports(&mut self, reports: &Map<String, raw::Report>) -> Result<()> {
         for raw::Report {
             cells,
             variable_name,
             sections,
             enabled,
             ..
-        } in sim.reports.values()
+        } in reports.values()
         {
             if !enabled {
                 continue;
             }
-            let gids = resolve_nodeset(cells, &node_populations, &node_population_ids)?;
+            let gids = self.resolve_nodeset(cells)?;
             let probe = if !sections.is_empty() {
                 let sections = sections.clone();
                 if variable_name == "v" {
                     Probe::CableVoltage(sections)
                 } else if variable_name.ends_with('i') {
-                    // TODO this is nasty, what if a STATE ends in i/o?!
+                    eprintln!("Interpreting {variable_name} as internal ion concentration.");
                     Probe::CableIntConc(variable_name.clone(), sections)
                 } else if variable_name.ends_with('o') {
+                    eprintln!("Interpreting {variable_name} as external ion concentration.");
                     Probe::CableExtConc(variable_name.clone(), sections)
                 } else {
                     Probe::CableState(variable_name.clone(), sections)
@@ -865,43 +828,112 @@ impl Simulation {
                 bail!("No clue how to probe {variable_name} on LIF cells.");
             };
             for gid in gids {
-                reports.entry(gid).or_default().push(probe.clone());
+                self.reports.entry(gid).or_default().push(probe.clone());
             }
         }
+        Ok(())
+    }
 
-        let cv_policy = if let Some(d) = sim.run.dl {
-            CVPolicy::MaxExtent(d)
-        } else {
-            CVPolicy::Default
+    fn read_iclamps(&mut self, inputs: &Map<String, raw::Input>) -> Result<()> {
+        let mut tag = 0;
+        for input in inputs.values() {
+            if let raw::Input::CurrentClamp {
+                amp,
+                delay,
+                duration,
+                node_set,
+                enabled,
+                ..
+            } = input
+            {
+                if !enabled {
+                    continue;
+                }
+                assert!(amp.len() == delay.len());
+                assert!(amp.len() == duration.len());
+                let set = node_set
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("No nodeset given."))?;
+                let gids = self.resolve_nodeset(set)?;
+                // TODO find a better way here, there might be `electrode_file` present...
+                let location = String::from("(location 0 0.5)");
+                eprintln!("Using placeholder current clamp location {location} for {input:?}.");
+                for gid in gids.into_iter() {
+                    for ix in 0..amp.len() {
+                        let ic = IClamp {
+                            amplitude_nA: amp[ix],
+                            delay_ms: delay[ix],
+                            duration_ms: duration[ix],
+                            tag,
+                            location: location.clone(),
+                        };
+                        self.iclamps.entry(gid).or_default().push(ic);
+                        tag += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_nodeset(&self, cells: &raw::NodeSet) -> Result<Vec<u64>> {
+        let res = match cells {
+            raw::NodeSet::Name(nm) => {
+                let pid = self
+                    .node_population_ids
+                    .get(nm)
+                    .ok_or(anyhow!("Unkown population <{nm}>"))?;
+                let PopId { start, size, .. } = self.node_populations[*pid];
+                (start..start + size).map(|i| i as u64).collect()
+            }
+            raw::NodeSet::Basic { population, rules } => {
+                let mut res = Vec::new();
+                let pop = population.as_ref().ok_or_else(|| anyhow!("Basic NodeSet {cells:?} has no population."))?;
+                let pid = self.node_population_ids.get(pop).ok_or_else(|| anyhow!("Basic NodeSet refers to unknown population {pop}."))?;
+                let PopId { start, size, .. } = &self.node_populations[*pid];
+                for gid in *start..*start + *size {
+                    let Node { dynamics, custom, .. } = self.reify_node(gid)?;
+                    let mut pred = true;
+                    for (k, vs) in rules.iter() {
+                        // TODO Can we match on anything else?
+                        if let Some(u) = dynamics.get(k).or(custom.get(k)) {
+                            match vs {
+                                serde_json::Value::Number(v) => {
+                                    let v = v.as_f64().ok_or_else(|| anyhow!("Basic NodeSet {cells:?} has non-float number for param {k}."))?;
+                                    pred &= v == *u;
+                                }
+                                serde_json::Value::Array(vs) => {
+                                    // Array filters are true if any value matches
+                                    let mut found = false;
+                                    for v in vs {
+                                        let v = v.as_f64().ok_or_else(|| anyhow!("Basic NodeSet {cells:?} has non-float number for param {k}."))?;
+                                        found |= v == *u;
+                                    }
+                                    pred &= found;
+                                }
+                                _ => bail!("Cannot match on a {vs:?} in BasicNodeSet, must be list or value.")
+                            };
+                        } else {
+                            // TODO What happens if we do not match the parameter name here?
+                            eprintln!("Note: paramter {k} was not found in node {gid}. Currently we reject such nodes. If you consider this a bug, please report it as such.")
+                        }
+                    }
+                    if pred {
+                        res.push(gid as u64);
+                    }
+                }
+                res
+            }
+            raw::NodeSet::Ids(vs) => vs.clone(),
+            raw::NodeSet::Compound(nss) => {
+                let mut res = Vec::new();
+                for ns in nss {
+                    res.append(&mut self.resolve_nodeset(ns)?);
+                }
+                res
+            }
         };
-
-        let virtual_spikes = read_virtual_spikes(&sim.components, &sim.inputs)?;
-        let iclamps = read_iclamps(&sim.inputs, &node_populations, &node_population_ids)?;
-
-        let global_properties =
-            if let raw::Conditions::Detailled { celsius, v_init } = sim.conditions {
-                Some(GlobalProperties { celsius, v_init })
-            } else {
-                None
-            };
-
-        Ok(Self {
-            tfinal: sim.run.tstop,
-            dt: sim.run.dt,
-            node_lists,
-            edge_lists,
-            gid_to_node_population,
-            node_population_to_gid,
-            node_populations,
-            node_population_ids,
-            reports,
-            iclamps,
-            cv_policy,
-            virtual_spikes,
-            global_properties,
-            size: start,
-            spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
-        })
+        Ok(res)
     }
 
     fn reify_edges(&self, target_population: &str, target_id: u64) -> Result<Vec<Edge>> {
@@ -1027,7 +1059,6 @@ impl Simulation {
                         ds[group_index]
                     } else if let Some(s) = ty.attributes.get("afferent_swc_id") {
                         if let Attribute::Float(s) = s {
-                            // TODO _is_ that a float or a string or neither/
                             *s
                         } else {
                             bail!(
@@ -1059,7 +1090,7 @@ impl Simulation {
                         // ds[group_index]
                     } else if let Some(_) = ty.attributes.get("efferent_swc_id") {
                         bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
-                        // if let Attribute::Float(s) = s { // TODO _is_ that a float or a string or neither/
+                        // if let Attribute::Float(s) = s {
                         // *s
                         // } else {
                         // bail!(

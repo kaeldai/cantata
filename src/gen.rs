@@ -232,7 +232,7 @@ impl Bundle {
                                 ("cm".to_string(), 1.0),
                                 ("U_neutral".to_string(), 0.0),
                                 ("U_reset".to_string(), 0.0),
-                                ("U_th".to_string(), 1.0), // TODO IntFire1 do be weird.
+                                ("U_th".to_string(), 1.0), // NOTE IntFire1 do be weird.
                                 ("U_0".to_string(), 0.0),
                                 ("t_ref".to_string(), 5.0),
                                 ("tau".to_string(), 10.0),

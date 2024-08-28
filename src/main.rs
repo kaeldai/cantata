@@ -1,4 +1,3 @@
-use clap::{self, Parser, Subcommand, ValueEnum};
 use cantata::{
     err::{Context, Result},
     fit::Fit,
@@ -7,6 +6,7 @@ use cantata::{
     sim::Simulation,
     sup::find_component,
 };
+use clap::{self, Parser, Subcommand, ValueEnum};
 use std::str::FromStr;
 
 #[derive(Parser)]

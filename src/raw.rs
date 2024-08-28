@@ -113,7 +113,7 @@ pub enum Conditions {
     None,
     /// For NEURON/Arbor
     Detailled { celsius: f64, v_init: f64 },
-    /// TODO For LGN model???
+    /// Unused
     LGN {
         jitter_lower: f64,
         jitter_upper: f64,
@@ -123,7 +123,6 @@ pub enum Conditions {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Waveform {
-    /// TODO this can be only a few values: sin ...
     shape: String,
     /// delay [ms]
     del: f64,
