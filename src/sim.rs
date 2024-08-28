@@ -888,11 +888,18 @@ impl Simulation {
             }
             raw::NodeSet::Basic { population, rules } => {
                 let mut res = Vec::new();
-                let pop = population.as_ref().ok_or_else(|| anyhow!("Basic NodeSet {cells:?} has no population."))?;
-                let pid = self.node_population_ids.get(pop).ok_or_else(|| anyhow!("Basic NodeSet refers to unknown population {pop}."))?;
+                let pop = population
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Basic NodeSet {cells:?} has no population."))?;
+                let pid = self
+                    .node_population_ids
+                    .get(pop)
+                    .ok_or_else(|| anyhow!("Basic NodeSet refers to unknown population {pop}."))?;
                 let PopId { start, size, .. } = &self.node_populations[*pid];
                 for gid in *start..*start + *size {
-                    let Node { dynamics, custom, .. } = self.reify_node(gid)?;
+                    let Node {
+                        dynamics, custom, ..
+                    } = self.reify_node(gid)?;
                     let mut pred = true;
                     for (k, vs) in rules.iter() {
                         // TODO Can we match on anything else?
@@ -1085,11 +1092,11 @@ impl Simulation {
                         0.5 // default to centering
                     };
 
-                    let src_id = if let Some(_) = edge_group.custom.get("efferent_swc_id") {
-                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                    let src_id = if let Some(id) = edge_group.custom.get("efferent_swc_id") {
+                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent id {id:?}", edge_population.name);
                         // ds[group_index]
-                    } else if let Some(_) = ty.attributes.get("efferent_swc_id") {
-                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent position", edge_population.name);
+                    } else if let Some(id) = ty.attributes.get("efferent_swc_id") {
+                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent SWC id {id:?}", edge_population.name);
                         // if let Attribute::Float(s) = s {
                         // *s
                         // } else {

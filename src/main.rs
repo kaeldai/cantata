@@ -17,6 +17,7 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, ValueEnum)]
 enum Format {
     CBOR,
@@ -66,7 +67,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
             for fit in out.decoration.iter_mut() {
-                to.push(&fit);
+                to.push(fit as &str);
                 to.set_extension("acc");
                 let src = find_component(fit, &raw.components)
                     .with_context(|| format!("Searching raw fit {fit:?}"))?;
