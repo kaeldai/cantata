@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     name: stable / fmt
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -46,6 +48,8 @@ jobs:
         # Get early warning of new lints which are regularly introduced in beta channels.
         toolchain: [stable, beta]
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -63,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     name: semver
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -79,6 +85,8 @@ jobs:
     runs-on: ubuntu-latest
     name: nightly / doc
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -94,6 +102,8 @@ jobs:
     runs-on: ubuntu-latest
     name: ubuntu / stable / features
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -115,6 +125,8 @@ jobs:
         msrv: ["1.56.1"] # 2021 edition requires 1.56
     name: ubuntu / ${{ matrix.msrv }}
     steps:
+      - name: Dependencies
+        run: sudo apt install libhdf5-serial-dev
       - uses: actions/checkout@v4
         with:
           submodules: true
