@@ -2,7 +2,7 @@
 name = "cantata"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.74.0"
+rust-version = "1.77.0"
 authors = ["T. Hater"]
 readme = "Readme.org"
 license = "BSD-3-Clause"
