@@ -1,28 +1,60 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
+import subprocess as sp
+import site
+import sys
+import re
+
+# configuration
+have_timing = False
+have_stats = False
+have_venv = True
+
+cur_version = [0, 10, 0]
+nxt_version = [0, 11, 0]
+cur_version_str = f"{cur_version[0]}.{cur_version[1]}.{cur_version[2]}"
+nxt_version_str = "nxt_version[0]}.{nxt_version[1]}.{nxt_version[2]}"
+
+here = Path(__file__).parent
+
+# Setup venv, if needed
+if have_venv:
+    env = here / ".env"
+    if not Path(env).exists():
+        print(f"No .env found, setting up {here}/.env")
+        sp.run(
+            f'bash -c "/usr/bin/env python3 -mvenv {env} && source {env}/activate && pip3 install arbor=={cur_version_str} matplotlib numpy pandas cbor2"',
+            shell=True,
+            check=True,
+        )
+
+    # activate our env manually and ensure it's in front
+    version = re.match(r"(\d+\.\d+)\..+", sys.version).group(1)
+    site_packages = here / ".env" / "lib" / f"python{version}" / "site-packages"
+    old_path = list(sys.path)
+    site.addsitedir(site_packages)
+    sys.real_prefix = sys.prefix
+    sys.prefix = here
+    sys.path[:0] = [item for item in list(sys.path) if item not in old_path] + sys.path
+
 from collections import defaultdict
 import arbor as A
 from arbor import units as U
 import pandas as pd
 import matplotlib.pyplot as plt
 from time import perf_counter as pc
-import re
-from pathlib import Path
 from cbor2 import load as load_data
 from math import ceil
-
-here = Path(__file__).parent
-
-have_timing = False
-have_stats = False
 
 # check arbor version
 ver = re.match(r"(\d+)\.(\d+)\.(\d+)(-\w+)?", A.__version__)
 if ver:
     mj, mn, pt, sf = ver.groups()
+    ver = [int(mj), int(mn), int(pt)]
     assert (
-        10000 <= (int(mj) * 1000 + int(mn)) * 1000 + int(pt) <= 11000
-    ), "Arbor version 0.10.x is required."
+        cur_version <= ver <= nxt_version
+    ), f"Arbor {cur_version_str} <= version <= {nxt_version_str} is required, got {A.__version__}"
 else:
     print(f"Couldn't parse version {A.__version__}")
     exit(-42)
@@ -46,7 +78,7 @@ def load_morphology(path):
     elif sfx == ".nml":
         nml = A.neuroml(path)
         if len(nml.morphology_ids()) == 1:
-            return nml.morphology(nml.morphology_ids()[0])
+            return nml.morphology(nml.morphology_ids()[0]).morphology
         else:
             raise RuntimeError(f"NML file {path} contains multiple morphologies.")
     else:
