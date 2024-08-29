@@ -30,12 +30,12 @@ This will perform the translation and create a working simulation in the output
 directory `out-dir`. Running the simulation will generate the requested outputs
 (spikes and traces) in `out-dir/out`. You may want/need to tweak the simulation.
 
-There is a convenience wrapper that does all of the above in one go
-``` sh
+There is a convenience wrapper that does all of the above and will construct and
+    execute the simulation in `simulation.sim`.
+
+```sh
 cantata run path/to/sonata/simulation.json
 ```
-
-    Which will construct and execute the simulation in `simulation.sim`. 
 
 ## Setup (dev)
 
