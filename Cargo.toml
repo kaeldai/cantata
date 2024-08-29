@@ -2,7 +2,7 @@
 name = "cantata"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.77.0"
+rust-version = "1.80.0"
 authors = ["T. Hater"]
 readme = "Readme.org"
 license = "BSD-3-Clause"
@@ -18,7 +18,7 @@ clap         = { version = "4.0", features = ["derive"] }
 thiserror    = { version = "1.0" }
 anyhow       = { version = "1.0" }
 csv          = { version = "1.0" }
-hdf5-metno   = { version = "0.9.1" }
+hdf5-metno   = { version = "0.9.2" }
 ciborium     = { version = "0.2" }
 serde-pickle = { version = "1.1" }
 nml2         = { version = "0.3.1"}
