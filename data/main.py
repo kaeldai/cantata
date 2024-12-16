@@ -322,9 +322,12 @@ class recipe(A.recipe):
                     ),
                     f"ic-{tag}",
                 )
-        dec.discretization(self.cv_policy)
-
-        return A.cable_cell(mrf, dec, lbl)
+        
+        try:
+            dec.discretization(self.cv_policy)
+            return A.cable_cell(mrf, dec, lbl)
+        except AttributeError as ae:
+            return A.cable_cell(mrf, dec, lbl, self.cv_policy)
 
     def make_lif_cell(self, gid):
         cell = A.lif_cell("src-0", "syn-0")
@@ -401,7 +404,11 @@ df = pd.DataFrame(
 df["kind"] = df["gid"].map(lambda i: rec.gid_to_kid[i])
 df["population"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["population"])
 df["type"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["type_id"])
-df.to_csv(here / "out" / "spikes.csv")
+
+for pop, pop_df in df.groupby("population"):
+    pop_df.to_csv(here / "out" / f"spikes.{pop}.csv", index=False)
+
+# df.to_csv(here / "out" / "spikes.csv")
 timing.toc("output/spikes")
 
 timing.tic("output/samples")

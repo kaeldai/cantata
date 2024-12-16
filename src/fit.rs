@@ -123,14 +123,14 @@ pub struct Decor {
 }
 
 impl Decor {
-    pub fn to_acc(&self) -> Result<String> {
+    pub fn to_acc(&self, ver_str: &str) -> Result<String> {
         let mut acc = String::new();
-        acc.push_str(
-            "(arbor-component
+        let header: String = format!("(arbor-component
   (meta-data
-    (version \"0.9-dev\"))
-      (decor",
+    (version \"{}\"))
+      (decor", ver_str
         );
+        acc.push_str(&header);
         if let Some(v) = self.defaults.cm {
             acc.push_str(&format!(
                 "\n        (default

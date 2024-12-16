@@ -32,15 +32,21 @@ enum Cmd {
         to: String,
         #[arg(short, long)]
         formats: Vec<Format>,
+
+        #[arg(short, long, default_value="0.9-dev")]
+        arbor_version: String,
     },
     Run {
         from: String,
         #[arg(short, long)]
         to: Option<String>,
+
+        #[arg(short, long, default_value="0.9-dev")]
+        arbor_version: String,
     },
 }
 
-fn build(from: &str, to: &str, formats: &[Format]) -> Result<()> {
+fn build(from: &str, to: &str, formats: &[Format], ver_str: &str) -> Result<()> {
     let raw =
         raw::Simulation::from_file(from).with_context(|| format!("Parsing simulation {from}"))?;
     let sim = Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
@@ -78,7 +84,7 @@ fn build(from: &str, to: &str, formats: &[Format]) -> Result<()> {
                     .with_context(|| format!("Extracting fit {src:?}"))?
                     .decor()
                     .with_context(|| format!("Building decor for fit {src:?}"))?
-                    .to_acc()
+                    .to_acc(&ver_str)
                     .with_context(|| format!("Converting fit {src:?} to acc"))?;
                 std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
             }
@@ -138,13 +144,19 @@ fn main() -> Result<()> {
             from,
             to,
             ref mut formats,
+            arbor_version,
         } => {
             if formats.is_empty() {
                 formats.push(Format::CBOR);
             }
-            build(&from, &to, formats)
+            // print!("{arbor_version:?}");
+            build(&from, &to, formats, &arbor_version)
         }
-        Cmd::Run { from, to } => {
+        Cmd::Run { 
+            from, 
+            to,
+            arbor_version,
+         } => {
             let to = if let Some(to) = to {
                 to.to_string()
             } else {
@@ -152,7 +164,7 @@ fn main() -> Result<()> {
                 to.set_extension("sim");
                 to.file_name().and_then(|s| s.to_str()).unwrap().to_string()
             };
-            build(&from, &to, &[Format::CBOR])?;
+            build(&from, &to, &[Format::CBOR], &arbor_version)?;
             let _ = std::process::Command::new("python3")
                 .current_dir(to)
                 .arg("main.py")
